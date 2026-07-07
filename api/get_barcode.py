@@ -11,6 +11,7 @@ MY_PAGE_URL = "https://m.sktuniverse.co.kr/my"
 LOGIN_VIEW_URL = "https://m.sktuniverse.co.kr/member/login/view?loginRedirectUrl=%2Fmy"
 TID_AUTHORIZE_URL = "https://tapi.t-id.co.kr/oidc/v20/authorize?client_id=a1c144a9-6ab3-49f3-b03f-4ce80d257f16&redirect_uri=https%3A%2F%2Fm.sktuniverse.co.kr%2Fmember%2Flogin%2Fchannel/tid"
 MOBILE_USER_AGENT = "Mozilla/5.0 (Linux; Android 13; SM-G981B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Mobile Safari/537.36"
+BARCODE_CACHE = {}
 
 CODE128_PATTERNS = [
     "212222", "222122", "222221", "121223", "121322", "131222", "122213", "122312", "132212", "221213",
@@ -232,7 +233,7 @@ def wait_for_my_ready(page, timeout_ms=5000):
     return False
 
 
-def open_barcode_view(page):
+def open_barcode_view(page, deadline=None):
     before_url = safe_url(page)
     before_text = get_body_text(page, 220)
     try:
@@ -252,6 +253,8 @@ def open_barcode_view(page):
     except Exception as exc:
         print(f"debug barcode dom click failed: {exc}", flush=True)
     for x, y in [(300, 32), (320, 32), (340, 32), (380, 32), (292, 104), (332, 104), (372, 104)]:
+        if deadline and time.monotonic() > deadline:
+            return "deadline-before-barcode-tap"
         physical_tap_at(page, x, y)
         page.wait_for_timeout(1300)
         print(f"debug barcode coordinate tapped {x},{y} url={safe_url(page)} body={get_body_text(page, 180)}", flush=True)
@@ -276,6 +279,9 @@ def handler():
         target = next((acc for acc in accounts if acc["id"] == account_id), None)
         if not target:
             return f"Account not found: {account_id}", 404
+        cached = BARCODE_CACHE.get(account_id)
+        if not debug_mode and cached and cached.get("expires_at", 0) > time.time() + 5:
+            return barcode_response(cached["number"], int(cached["expires_at"] - time.time()))
         with sync_playwright() as p:
             stage = "connect_browserless"; mark(stage)
             browser = p.chromium.connect_over_cdp(f"wss://chrome.browserless.io?token={BROWSERLESS_TOKEN}&stealth=true&timeout=60000", timeout=8000)
@@ -303,7 +309,9 @@ def handler():
             wait_for_my_ready(page, 5000)
             print(f"debug final my url={safe_url(page)} body={get_body_text(page, 260)}", flush=True)
             stage = "open_barcode_view"; mark(stage)
-            barcode_result = open_barcode_view(page)
+            if time.monotonic() - started > 52:
+                return image_response(f"Barcode timed out before opening view\nID: {account_id}\nelapsed={time.monotonic() - started:.1f}s"), 504
+            barcode_result = open_barcode_view(page, started + 52)
             barcode_number = ""
             for _ in range(10):
                 barcode_number = extract_barcode_number(page)
@@ -314,6 +322,10 @@ def handler():
             if debug_mode:
                 return diagnostic_response(page, context, account_id, f"{result}; barcode={barcode_result}; number={barcode_number}; seconds={seconds_left}", time.monotonic() - started)
             if barcode_number:
+                BARCODE_CACHE[account_id] = {
+                    "number": barcode_number,
+                    "expires_at": time.time() + max(1, int(seconds_left or 1200))
+                }
                 return barcode_response(barcode_number, seconds_left)
             return image_response(f"Barcode number not found\nID: {account_id}\nbarcode_result={barcode_result}\nurl={safe_url(page)}\nbody={get_body_text(page, 260)}"), 502
     except Exception as exc:
