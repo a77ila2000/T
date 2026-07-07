@@ -14,13 +14,6 @@ ENCRYPTED_ACCOUNTS_B64 = os.environ.get("ENCRYPTED_ACCOUNTS")
 BROWSERLESS_TOKEN = os.environ.get("BROWSERLESS_TOKEN", "2Uq9iBy84O6QGwO008597820ed94cb8fb02789f1092d91545")
 
 MY_PAGE_URL = "https://m.sktuniverse.co.kr/my"
-LOGIN_VIEW_URL = "https://m.sktuniverse.co.kr/member/login/view?loginRedirectUrl=%2Fmy"
-TID_AUTHORIZE_URL = (
-    "https://tapi.t-id.co.kr/oidc/v20/authorize"
-    "?client_id=a1c144a9-6ab3-49f3-b03f-4ce80d257f16"
-    "&redirect_uri=https%3A%2F%2Fm.sktuniverse.co.kr%2Fmember%2Flogin%2Fchannel%2Ftid"
-)
-
 MOBILE_USER_AGENT = (
     "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) "
     "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 "
@@ -71,6 +64,16 @@ def wait_for_any(page, selectors, timeout=8000):
     locator = page.locator(", ".join(selectors)).first
     locator.wait_for(state="visible", timeout=timeout)
     return locator
+
+def wait_for_text_contains(page, expected, timeout_ms=12000):
+    end = time.monotonic() + timeout_ms / 1000
+    last_body = ""
+    while time.monotonic() < end:
+        last_body = get_body_text(page, 400)
+        if expected in last_body:
+            return
+        time.sleep(0.3)
+    raise TimeoutError(f"text not visible: {expected}. url={safe_url(page)} body={last_body}")
 
 def new_mobile_context(browser):
     return browser.new_context(
@@ -145,6 +148,35 @@ def wait_for_tid_result(tid_page, timeout_ms=5200):
     print(f"debug T ID result wait timed out at url={last_url} body={get_body_text(tid_page, 200)}", flush=True)
     return "timeout"
 
+def open_tid_from_my(main_page):
+    main_page.goto(MY_PAGE_URL, wait_until="domcontentloaded", timeout=16000)
+    main_page.wait_for_timeout(1000)
+    print(f"debug my page before login url={safe_url(main_page)} body={get_body_text(main_page, 180)}", flush=True)
+
+    try:
+        login_entry = main_page.locator("text=로그인·회원가입").first
+        physical_tap(login_entry, timeout=5000)
+    except Exception as login_click_error:
+        print(f"login text click failed, using coordinate: {login_click_error}", flush=True)
+        body = get_body_text(main_page, 260)
+        y = 156 if "보러가기" in body else 96
+        physical_tap_at(main_page, 105, y)
+
+    wait_for_text_contains(main_page, "T아이디", timeout_ms=12000)
+    main_page.wait_for_timeout(800)
+    print(f"debug login chooser url={safe_url(main_page)} body={get_body_text(main_page, 220)}", flush=True)
+
+    before_pages = list(main_page.context.pages)
+    tid_button = main_page.locator("#link-to-tid-login").first
+    physical_tap(tid_button, timeout=8000)
+    main_page.wait_for_timeout(2200)
+    after_pages = list(main_page.context.pages)
+    new_pages = [candidate for candidate in after_pages if candidate not in before_pages]
+    tid_page = new_pages[-1] if new_pages else main_page
+    tid_page.set_default_timeout(8000)
+    print(f"debug after T button pages_before={len(before_pages)} pages_after={len(after_pages)} tid_url={safe_url(tid_page)} body={get_body_text(tid_page, 180)}", flush=True)
+    return tid_page
+
 @app.route("/api/get_barcode", methods=["GET"])
 def handler():
     account_id = request.args.get("id")
@@ -167,19 +199,9 @@ def handler():
             main_page = context.new_page()
             main_page.set_default_timeout(8000)
 
-            stage = "prime_t_universe_main_page"
-            print(f"stage={stage}", flush=True)
-            main_page.goto(LOGIN_VIEW_URL, wait_until="domcontentloaded", timeout=16000)
-            main_page.wait_for_timeout(900)
-            print(f"debug main login view url={safe_url(main_page)} body={get_body_text(main_page, 160)}", flush=True)
-
-            stage = "open_tid_page_same_context"
-            tid_page = context.new_page()
-            tid_page.set_default_timeout(8000)
-            tid_page.goto(TID_AUTHORIZE_URL, wait_until="domcontentloaded", timeout=16000, referer=LOGIN_VIEW_URL)
-            tid_page.wait_for_timeout(700)
+            stage = "open_tid_from_my"
+            tid_page = open_tid_from_my(main_page)
             wait_for_tid_login_form(tid_page, timeout_ms=12000)
-            print(f"debug tid form url={safe_url(tid_page)} body={get_body_text(tid_page, 160)}", flush=True)
 
             stage = "type_tid_credentials"
             user_selector = type_first_visible(tid_page, [
@@ -211,7 +233,7 @@ def handler():
             result = wait_for_tid_result(tid_page, timeout_ms=5200)
             print(f"debug tid submit result={result} url={safe_url(tid_page)}", flush=True)
 
-            stage = "open_my_on_main_page_after_login"
+            stage = "open_my_after_login"
             if main_page.is_closed():
                 main_page = context.new_page()
                 main_page.set_default_timeout(8000)
