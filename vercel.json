@@ -1,22 +1,8 @@
 {
-  "builds": [
+  "rewrites": [
     {
-      "src": "api/get_barcode.py",
-      "use": "@vercel/python"
-    },
-    {
-      "src": "public/**",
-      "use": "@vercel/static"
-    }
-  ],
-  "routes": [
-    {
-      "src": "/api/get_barcode",
-      "dest": "api/get_barcode.py"
-    },
-    {
-      "src": "/(.*)",
-      "dest": "public/$1"
+      "source": "/api/get_barcode",
+      "destination": "/api/get_barcode.py"
     }
   ],
   "functions": {
