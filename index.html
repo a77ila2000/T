@@ -1,0 +1,130 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>T우주 가족 바코드</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div class="dashboard">
+        <header>
+            <h1>T우주 가족 바코드</h1>
+        </header>
+
+        <main id="card-container"></main>
+
+        <div class="card links-card">
+            <h3>바로가기</h3>
+            <div class="links-container">
+                <a href="https://m.paris.co.kr/" target="_blank">파리바게뜨</a>
+                <a href="https://pocketcu.co.kr/main" target="_blank">포켓CU</a>
+                <a href="https://m.sktmembership.co.kr/m/" target="_blank">T멤버십</a>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        document.addEventListener('DOMContentLoaded', () => {
+            // API에서 계정 정보를 가져와서 UI를 동적으로 생성할 수 있습니다.
+            // 여기서는 간단하게 프론트엔드에 계정 목록을 정의합니다.
+            const accounts = [
+                { user: "나", id: "a77ila2000" },
+                { user: "어머니", id: "a77ila10004" },
+                { user: "아버지", id: "min560728" }
+            ];
+
+            const cardContainer = document.getElementById('card-container');
+            const BARCODE_VALID_TIME = 20 * 60; // 20분
+
+            accounts.forEach(account => {
+                const card = document.createElement('div');
+                card.className = 'card';
+                card.id = `card-${account.id}`;
+                card.innerHTML = `
+                    <div class="card-header">
+                        <h2>${account.user}</h2>
+                        <button class="btn" data-id="${account.id}">바코드 보기</button>
+                    </div>
+                    <div class="barcode-container">
+                        <div class="barcode-placeholder">버튼을 눌러 바코드를 생성하세요</div>
+                        <div class="loader hidden"></div>
+                        <img data-id="${account.id}" class="hidden" alt="${account.user} 바코드">
+                    </div>
+                    <div class="card-footer">
+                        <div class="timer"></div>
+                        <div class="status"></div>
+                    </div>
+                `;
+                cardContainer.appendChild(card);
+
+                const button = card.querySelector('.btn');
+                button.addEventListener('click', () => fetchBarcode(account.id));
+            });
+
+            function fetchBarcode(accountId) {
+                const card = document.getElementById(`card-${accountId}`);
+                const img = card.querySelector(`img[data-id="${accountId}"]`);
+                const loader = card.querySelector('.loader');
+                const placeholder = card.querySelector('.barcode-placeholder');
+                const timerEl = card.querySelector('.timer');
+                const statusEl = card.querySelector('.status');
+
+                // 기존 타이머 중지
+                if (img.dataset.timerId) {
+                    clearInterval(parseInt(img.dataset.timerId));
+                }
+
+                // UI 초기화 및 로더 표시
+                img.classList.add('hidden');
+                placeholder.classList.add('hidden');
+                loader.classList.remove('hidden');
+                statusEl.textContent = '바코드를 실시간으로 생성 중입니다...';
+                timerEl.textContent = '';
+
+                // 캐시 방지를 위해 timestamp 추가
+                img.src = `/api/get_barcode?id=${accountId}&t=${new Date().getTime()}`;
+
+                img.onload = () => {
+                    loader.classList.add('hidden');
+                    img.classList.remove('hidden');
+                    statusEl.textContent = '바코드가 생성되었습니다.';
+                    startTimer(accountId, BARCODE_VALID_TIME);
+                };
+
+                img.onerror = () => {
+                    loader.classList.add('hidden');
+                    statusEl.textContent = '오류가 발생했습니다. 다시 시도해주세요.';
+                    // 에러 이미지는 API에서 반환하므로, 그냥 보여주기만 하면 됩니다.
+                    img.classList.remove('hidden'); 
+                };
+            }
+
+            function startTimer(accountId, duration) {
+                const card = document.getElementById(`card-${accountId}`);
+                const img = card.querySelector(`img[data-id="${accountId}"]`);
+                const timerEl = card.querySelector('.timer');
+                const statusEl = card.querySelector('.status');
+
+                let timeLeft = duration;
+
+                const updateTimer = () => {
+                    const minutes = Math.floor(timeLeft / 60);
+                    const seconds = timeLeft % 60;
+                    timerEl.textContent = `남은 시간: ${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
+
+                    if (--timeLeft < 0) {
+                        clearInterval(timerId);
+                        statusEl.textContent = '바코드가 만료되었습니다. 자동 갱신 중...';
+                        fetchBarcode(accountId); // 자동 갱신
+                    }
+                };
+
+                updateTimer();
+                const timerId = setInterval(updateTimer, 1000);
+                img.dataset.timerId = timerId.toString();
+            }
+        });
+    </script>
+</body>
+</html>
