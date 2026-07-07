@@ -44,10 +44,12 @@ def create_error_image(account_id, error):
     return Response(img_byte_arr.getvalue(), mimetype="image/png")
 
 def screenshot_response(page):
-    return Response(
-        page.screenshot(type="png", full_page=False, timeout=5000),
-        mimetype="image/png",
-    )
+    try:
+        client = page.context.new_cdp_session(page)
+        data = client.send("Page.captureScreenshot", {"format": "png", "fromSurface": True})
+        return Response(base64.b64decode(data["data"]), mimetype="image/png")
+    except Exception as screenshot_error:
+        return create_error_image("debug", f"debug screenshot failed: {screenshot_error}. url={safe_url(page)} body={get_body_text(page, 220)}")
 
 def seconds_left(deadline):
     return max(0.5, deadline - time.monotonic())
