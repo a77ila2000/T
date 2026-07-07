@@ -21,12 +21,10 @@ def decrypt_accounts():
 
 def image_response(text, color=(255, 235, 238)):
     from PIL import Image, ImageDraw
-    img = Image.new("RGB", (760, 300), color=color)
-    draw = ImageDraw.Draw(img)
+    img = Image.new("RGB", (760, 300), color=color); draw = ImageDraw.Draw(img)
     msg = str(text).replace("\n", " ")[:430]
     draw.multiline_text((18, 34), "\n".join(msg[i:i + 76] for i in range(0, len(msg), 76)), fill=(211, 47, 47))
-    out = io.BytesIO(); img.save(out, format="PNG")
-    return Response(out.getvalue(), mimetype="image/png")
+    out = io.BytesIO(); img.save(out, format="PNG"); return Response(out.getvalue(), mimetype="image/png")
 
 
 def safe_url(page):
@@ -45,8 +43,7 @@ def goto_page(page, url, timeout=9000, referer=None):
         if referer: args["referer"] = referer
         return page.goto(url, **args)
     except Exception as exc:
-        print(f"debug goto ignored url={url} current={safe_url(page)} error={type(exc).__name__}: {exc}", flush=True)
-        return None
+        print(f"debug goto ignored url={url} current={safe_url(page)} error={type(exc).__name__}: {exc}", flush=True); return None
 
 
 def screenshot_bytes(page):
@@ -74,21 +71,26 @@ def cookie_lines(context):
 
 
 def install_network_debug(page, events):
-    def keep(url): return any(x in url for x in ["m.sktuniverse.co.kr", "api.sktuniverse", "tapi.t-id.co.kr", "auth.skt-id.co.kr"])
-    def trim(url):
-        for p in ["https://m.sktuniverse.co.kr", "https://tapi.t-id.co.kr", "https://auth.skt-id.co.kr"]: url = url.replace(p, "")
-        return url[:150]
+    skip = ["google", "analytics", "doubleclick", "facebook", "criteo", "clarity", ".css", ".js", ".woff", ".png", ".jpg", ".gif"]
+    focus = ["skt", "t-id", "tid", "member", "login", "my", "user", "User", "auth", "barcode", "coupon", "benefit", "subscription"]
+    def keep(url, rtype):
+        lower = url.lower()
+        if any(s in lower for s in skip): return False
+        if rtype in ["xhr", "fetch", "document"]: return True
+        return any(f.lower() in lower for f in focus)
+    def trim(url): return url.replace("https://", "")[:180]
     def on_response(resp):
         try:
-            if keep(resp.url):
-                events.append(f"{resp.status} {resp.request.method} {trim(resp.url)}")
-                if len(events) > 45: del events[:-45]
+            req = resp.request; url = resp.url
+            if keep(url, req.resource_type):
+                events.append(f"{resp.status} {req.resource_type} {req.method} {trim(url)}")
+                if len(events) > 70: del events[:-70]
         except Exception as exc: events.append(f"response-log-error {exc}")
     def on_failed(req):
         try:
-            if keep(req.url):
-                events.append(f"FAILED {req.method} {trim(req.url)} {req.failure}")
-                if len(events) > 45: del events[:-45]
+            if keep(req.url, req.resource_type):
+                events.append(f"FAILED {req.resource_type} {req.method} {trim(req.url)} {req.failure}")
+                if len(events) > 70: del events[:-70]
         except Exception as exc: events.append(f"requestfailed-log-error {exc}")
     page.on("response", on_response); page.on("requestfailed", on_failed)
 
@@ -97,18 +99,16 @@ def diagnostic_response(page, context, account_id, result, elapsed, network_even
     from PIL import Image, ImageDraw
     try: shot = Image.open(io.BytesIO(screenshot_bytes(page))).convert("RGB")
     except Exception: shot = Image.new("RGB", (412, 915), color=(245, 245, 245))
-    img = Image.new("RGB", (shot.width + 820, max(shot.height, 1120)), color=(255, 255, 255))
+    img = Image.new("RGB", (shot.width + 920, max(shot.height, 1260)), color=(255, 255, 255))
     img.paste(shot, (0, 0)); draw = ImageDraw.Draw(img)
     x = shot.width + 18; y = 18
     rows = ["T Universe login diagnostic", f"account={account_id}", f"elapsed={elapsed:.1f}s result={result}", f"url={safe_url(page)}", f"body={get_body_text(page, 520)}", "", "cookies:"] + cookie_lines(context)
-    if network_events is not None: rows += ["", "network:"] + network_events[-28:]
+    if network_events is not None: rows += ["", "network:"] + network_events[-45:]
     for row in rows:
         row = str(row)
-        for i in range(0, len(row), 94):
-            draw.text((x, y), row[i:i + 94], fill=(20, 20, 20)); y += 18
+        for i in range(0, len(row), 106): draw.text((x, y), row[i:i + 106], fill=(20, 20, 20)); y += 18
         if y > img.height - 30: break
-    out = io.BytesIO(); img.save(out, format="PNG")
-    return Response(out.getvalue(), mimetype="image/png")
+    out = io.BytesIO(); img.save(out, format="PNG"); return Response(out.getvalue(), mimetype="image/png")
 
 
 def physical_tap_at(page, x, y):
@@ -124,16 +124,12 @@ def tap_locator(locator, timeout=5000):
     except Exception: pass
     box = locator.bounding_box(timeout=timeout)
     if not box: raise RuntimeError("no bounding box")
-    physical_tap_at(locator.page, box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
-    locator.page.wait_for_timeout(120)
+    physical_tap_at(locator.page, box["x"] + box["width"] / 2, box["y"] + box["height"] / 2); locator.page.wait_for_timeout(120)
 
 
 def type_first_visible(page, selectors, value, timeout=6000):
-    locator = page.locator(", ".join(selectors)).first
-    locator.wait_for(state="visible", timeout=timeout)
-    tap_locator(locator, timeout)
-    locator.fill("", timeout=timeout)
-    locator.type(value, delay=10, timeout=timeout)
+    locator = page.locator(", ".join(selectors)).first; locator.wait_for(state="visible", timeout=timeout)
+    tap_locator(locator, timeout); locator.fill("", timeout=timeout); locator.type(value, delay=10, timeout=timeout)
     return locator.evaluate("e => e.id || e.name || e.type || e.tagName")
 
 
@@ -157,14 +153,12 @@ def force_submit(page):
             const r = el.getBoundingClientRect(); const text = (el.innerText || el.value || el.getAttribute('aria-label') || '').trim();
             return {el, text, top:r.top, width:r.width, height:r.height, disabled:!!el.disabled};
           }).filter((i) => i.width > 100 && i.height > 20 && i.top > 330 && !i.disabled);
-          const target = items.find((i) => /로그인|login/i.test(i.text)) || items[0];
-          if (!target) return 'no-target';
+          const target = items.find((i) => /로그인|login/i.test(i.text)) || items[0]; if (!target) return 'no-target';
           target.el.scrollIntoView({block:'center'}); const opts={bubbles:true,cancelable:true,view:window};
           target.el.dispatchEvent(new MouseEvent('mousedown', opts)); target.el.dispatchEvent(new MouseEvent('mouseup', opts)); target.el.dispatchEvent(new MouseEvent('click', opts)); target.el.click();
           return `${target.text}|${target.top}|${target.width}x${target.height}`;
         }
-        """)
-        print(f"debug dom submit click target={clicked}", flush=True)
+        """); print(f"debug dom submit click target={clicked}", flush=True)
     except Exception as exc: print(f"debug dom submit click failed: {exc}", flush=True)
 
 
@@ -174,34 +168,26 @@ def wait_for_tid_result(page, timeout_ms=10000):
         url = safe_url(page)
         if page.is_closed(): return "closed"
         if "/member/login/channel/tid" in url or "code=" in url or "/my" in url:
-            print(f"debug T ID callback reached: {url}", flush=True)
-            page.wait_for_timeout(1000); return "callback"
+            print(f"debug T ID callback reached: {url}", flush=True); page.wait_for_timeout(1000); return "callback"
         time.sleep(0.2)
-    print(f"debug T ID result wait timed out at url={safe_url(page)} body={get_body_text(page, 200)}", flush=True)
-    return "timeout"
+    print(f"debug T ID result wait timed out at url={safe_url(page)} body={get_body_text(page, 200)}", flush=True); return "timeout"
 
 
 def open_tid_from_my(page):
-    goto_page(page, MY_PAGE_URL, timeout=7000)
-    page.wait_for_timeout(500)
-    goto_page(page, LOGIN_VIEW_URL, timeout=8000, referer=MY_PAGE_URL)
-    page.wait_for_timeout(700)
+    goto_page(page, MY_PAGE_URL, timeout=7000); page.wait_for_timeout(500)
+    goto_page(page, LOGIN_VIEW_URL, timeout=8000, referer=MY_PAGE_URL); page.wait_for_timeout(700)
     print(f"debug login view seeded url={safe_url(page)} body={get_body_text(page, 180)}", flush=True)
     before = safe_url(page)
     try:
         btn = page.locator("#link-to-tid-login, button:has-text('T 아이디'), button:has-text('T아이디'), text=T 아이디로 이용하기, text=T아이디로 이용하기").first
-        tap_locator(btn, timeout=2500)
-        print("debug tapped real T ID button", flush=True)
-    except Exception as exc:
-        print(f"debug real T ID button tap failed: {exc}", flush=True)
+        tap_locator(btn, timeout=2500); print("debug tapped real T ID button", flush=True)
+    except Exception as exc: print(f"debug real T ID button tap failed: {exc}", flush=True)
     page.wait_for_timeout(1200)
     if "auth.skt-id.co.kr" not in safe_url(page) and "tapi.t-id.co.kr" not in safe_url(page):
         referer = safe_url(page) if "sktuniverse" in safe_url(page) else LOGIN_VIEW_URL
         print(f"debug fallback authorize after button attempt url={safe_url(page)} body={get_body_text(page, 180)}", flush=True)
-        goto_page(page, TID_AUTHORIZE_URL, timeout=12000, referer=referer)
-        page.wait_for_timeout(300)
-    print(f"debug tid entry url={safe_url(page)} from={before} body={get_body_text(page, 180)}", flush=True)
-    return page
+        goto_page(page, TID_AUTHORIZE_URL, timeout=12000, referer=referer); page.wait_for_timeout(300)
+    print(f"debug tid entry url={safe_url(page)} from={before} body={get_body_text(page, 180)}", flush=True); return page
 
 
 @app.route("/api/get_barcode", methods=["GET"])
@@ -219,25 +205,19 @@ def handler():
             browser = p.chromium.connect_over_cdp(f"wss://chrome.browserless.io?token={BROWSERLESS_TOKEN}&stealth=true&timeout=60000", timeout=8000)
             context = browser.new_context(viewport={"width":412,"height":915}, user_agent=MOBILE_USER_AGENT, is_mobile=True, has_touch=True)
             page = context.new_page(); page.set_default_timeout(6000); install_network_debug(page, network_events)
-            stage = "open_tid_from_my"; mark(stage)
-            open_tid_from_my(page); wait_for_tid_login_form(page, 8000)
+            stage = "open_tid_from_my"; mark(stage); open_tid_from_my(page); wait_for_tid_login_form(page, 8000)
             stage = "type_tid_credentials"; mark(stage)
-            user_selector = type_first_visible(page, ["input#inputId", "input#userId", "input[name='userId']", "input[name='id']", "input[type='email']", "input[type='text']"], target["id"], 6000)
-            print(f"typed user selector: {user_selector}", flush=True)
-            password_selector = type_first_visible(page, ["input#inputPassword", "input#password", "input[name='password']", "input[name='passwd']", "input[type='password']"], target["password"], 6000)
-            print(f"typed password selector: {password_selector}", flush=True)
+            user_selector = type_first_visible(page, ["input#inputId", "input#userId", "input[name='userId']", "input[name='id']", "input[type='email']", "input[type='text']"], target["id"], 6000); print(f"typed user selector: {user_selector}", flush=True)
+            password_selector = type_first_visible(page, ["input#inputPassword", "input#password", "input[name='password']", "input[name='passwd']", "input[type='password']"], target["password"], 6000); print(f"typed password selector: {password_selector}", flush=True)
             stage = "submit_tid_login"; mark(stage)
             try:
-                page.locator("button:has-text('로그인'), button:has-text('Login'), input[type='submit']").last.click(force=True, timeout=2500)
-                print("debug locator force click submit", flush=True)
+                page.locator("button:has-text('로그인'), button:has-text('Login'), input[type='submit']").last.click(force=True, timeout=2500); print("debug locator force click submit", flush=True)
             except Exception as exc: print(f"login button locator failed: {exc}", flush=True)
             page.wait_for_timeout(250); physical_tap_at(page, 206, 470); page.wait_for_timeout(250); force_submit(page)
-            result = wait_for_tid_result(page, 10000)
-            print(f"debug tid submit result={result} url={safe_url(page)}", flush=True)
+            result = wait_for_tid_result(page, 10000); print(f"debug tid submit result={result} url={safe_url(page)}", flush=True)
             if debug_mode and result == "timeout": return diagnostic_response(page, context, account_id, result, time.monotonic() - started, network_events)
             stage = "open_my_after_login"; mark(stage)
-            goto_page(page, MY_PAGE_URL, timeout=9000)
-            page.wait_for_timeout(3500)
+            goto_page(page, MY_PAGE_URL, timeout=9000); page.wait_for_timeout(4500)
             print(f"debug final my url={safe_url(page)} body={get_body_text(page, 260)}", flush=True)
             if debug_mode: return diagnostic_response(page, context, account_id, result, time.monotonic() - started, network_events)
             return screenshot_response(page)
