@@ -7,7 +7,7 @@
   ],
   "routes": [
     {
-      "src": "/api/(.*)",
+      "src": "/api/get_barcode",
       "dest": "api/get_barcode.py"
     },
     {
