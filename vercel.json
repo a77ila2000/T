@@ -5,6 +5,17 @@
       "destination": "/api/get_barcode.py"
     }
   ],
+  "headers": [
+    {
+      "source": "/(.*)",
+      "headers": [
+        {
+          "key": "Cache-Control",
+          "value": "no-store, max-age=0"
+        }
+      ]
+    }
+  ],
   "functions": {
     "api/get_barcode.py": {
       "maxDuration": 60
