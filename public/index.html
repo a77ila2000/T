@@ -5,6 +5,12 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>T우주 가족 바코드</title>
     <link rel="stylesheet" href="style.css">
+    <style>
+        .btn:disabled {
+            opacity: 0.55;
+            cursor: wait;
+        }
+    </style>
 </head>
 <body>
     <div class="dashboard">
@@ -67,6 +73,7 @@
                 const placeholder = card.querySelector('.barcode-placeholder');
                 const timerEl = card.querySelector('.timer');
                 const statusEl = card.querySelector('.status');
+                const button = card.querySelector('.btn');
 
                 if (img.dataset.timerId) {
                     clearInterval(parseInt(img.dataset.timerId));
@@ -79,11 +86,18 @@
                 img.classList.add('hidden');
                 placeholder.classList.add('hidden');
                 loader.classList.remove('hidden');
+                button.disabled = true;
                 statusEl.textContent = '바코드를 실시간으로 생성 중입니다...';
                 timerEl.textContent = '';
 
                 try {
-                    const response = await fetch(`/api/get_barcode?id=${accountId}&t=${Date.now()}`, { cache: 'no-store' });
+                    const controller = new AbortController();
+                    const timeoutId = setTimeout(() => controller.abort(), 55000);
+                    const response = await fetch(`/api/get_barcode?id=${accountId}&t=${Date.now()}`, {
+                        cache: 'no-store',
+                        signal: controller.signal
+                    });
+                    clearTimeout(timeoutId);
                     if (!response.ok) {
                         throw new Error(`HTTP ${response.status}`);
                     }
@@ -105,8 +119,12 @@
                     loader.classList.add('hidden');
                     img.classList.add('hidden');
                     placeholder.classList.remove('hidden');
-                    placeholder.textContent = '오류가 발생했습니다. 다시 시도해주세요.';
-                    statusEl.textContent = String(error.message || error);
+                    placeholder.textContent = error.name === 'AbortError'
+                        ? '생성 시간이 초과되었습니다. 다시 시도해주세요.'
+                        : '오류가 발생했습니다. 다시 시도해주세요.';
+                    statusEl.textContent = error.name === 'AbortError' ? '요청 시간 초과' : String(error.message || error);
+                } finally {
+                    button.disabled = false;
                 }
             }
 
