@@ -74,31 +74,23 @@ def cookie_lines(context):
 
 
 def install_network_debug(page, events):
-    def keep(url):
-        return any(x in url for x in ["m.sktuniverse.co.kr", "api.sktuniverse", "tapi.t-id.co.kr", "auth.skt-id.co.kr"])
+    def keep(url): return any(x in url for x in ["m.sktuniverse.co.kr", "api.sktuniverse", "tapi.t-id.co.kr", "auth.skt-id.co.kr"])
     def trim(url):
-        for prefix in ["https://m.sktuniverse.co.kr", "https://tapi.t-id.co.kr", "https://auth.skt-id.co.kr"]:
-            url = url.replace(prefix, "")
+        for p in ["https://m.sktuniverse.co.kr", "https://tapi.t-id.co.kr", "https://auth.skt-id.co.kr"]: url = url.replace(p, "")
         return url[:150]
     def on_response(resp):
         try:
-            url = resp.url
-            if keep(url):
-                item = f"{resp.status} {resp.request.method} {trim(url)}"
-                events.append(item)
+            if keep(resp.url):
+                events.append(f"{resp.status} {resp.request.method} {trim(resp.url)}")
                 if len(events) > 45: del events[:-45]
-        except Exception as exc:
-            events.append(f"response-log-error {exc}")
+        except Exception as exc: events.append(f"response-log-error {exc}")
     def on_failed(req):
         try:
-            url = req.url
-            if keep(url):
-                events.append(f"FAILED {req.method} {trim(url)} {req.failure}")
+            if keep(req.url):
+                events.append(f"FAILED {req.method} {trim(req.url)} {req.failure}")
                 if len(events) > 45: del events[:-45]
-        except Exception as exc:
-            events.append(f"requestfailed-log-error {exc}")
-    page.on("response", on_response)
-    page.on("requestfailed", on_failed)
+        except Exception as exc: events.append(f"requestfailed-log-error {exc}")
+    page.on("response", on_response); page.on("requestfailed", on_failed)
 
 
 def diagnostic_response(page, context, account_id, result, elapsed, network_events=None):
@@ -109,8 +101,7 @@ def diagnostic_response(page, context, account_id, result, elapsed, network_even
     img.paste(shot, (0, 0)); draw = ImageDraw.Draw(img)
     x = shot.width + 18; y = 18
     rows = ["T Universe login diagnostic", f"account={account_id}", f"elapsed={elapsed:.1f}s result={result}", f"url={safe_url(page)}", f"body={get_body_text(page, 520)}", "", "cookies:"] + cookie_lines(context)
-    if network_events is not None:
-        rows += ["", "network:"] + network_events[-28:]
+    if network_events is not None: rows += ["", "network:"] + network_events[-28:]
     for row in rows:
         row = str(row)
         for i in range(0, len(row), 94):
@@ -194,26 +185,34 @@ def open_tid_from_my(page):
     goto_page(page, MY_PAGE_URL, timeout=7000)
     page.wait_for_timeout(500)
     goto_page(page, LOGIN_VIEW_URL, timeout=8000, referer=MY_PAGE_URL)
-    page.wait_for_timeout(500)
-    referer = safe_url(page) if "sktuniverse" in safe_url(page) else LOGIN_VIEW_URL
+    page.wait_for_timeout(700)
     print(f"debug login view seeded url={safe_url(page)} body={get_body_text(page, 180)}", flush=True)
-    goto_page(page, TID_AUTHORIZE_URL, timeout=12000, referer=referer)
-    page.wait_for_timeout(300)
-    print(f"debug direct tid url={safe_url(page)} body={get_body_text(page, 180)}", flush=True)
+    before = safe_url(page)
+    try:
+        btn = page.locator("#link-to-tid-login, button:has-text('T 아이디'), button:has-text('T아이디'), text=T 아이디로 이용하기, text=T아이디로 이용하기").first
+        tap_locator(btn, timeout=2500)
+        print("debug tapped real T ID button", flush=True)
+    except Exception as exc:
+        print(f"debug real T ID button tap failed: {exc}", flush=True)
+    page.wait_for_timeout(1200)
+    if "auth.skt-id.co.kr" not in safe_url(page) and "tapi.t-id.co.kr" not in safe_url(page):
+        referer = safe_url(page) if "sktuniverse" in safe_url(page) else LOGIN_VIEW_URL
+        print(f"debug fallback authorize after button attempt url={safe_url(page)} body={get_body_text(page, 180)}", flush=True)
+        goto_page(page, TID_AUTHORIZE_URL, timeout=12000, referer=referer)
+        page.wait_for_timeout(300)
+    print(f"debug tid entry url={safe_url(page)} from={before} body={get_body_text(page, 180)}", flush=True)
     return page
 
 
 @app.route("/api/get_barcode", methods=["GET"])
 def handler():
-    account_id = request.args.get("id")
-    debug_mode = request.args.get("debug") == "1"
+    account_id = request.args.get("id"); debug_mode = request.args.get("debug") == "1"
     if not account_id: return "Account ID is required.", 400
     browser = None; stage = "start"; started = time.monotonic(); network_events = []
     def mark(label): print(f"debug elapsed={time.monotonic() - started:.1f}s stage={label}", flush=True)
     try:
         stage = "decrypt_accounts"; mark(stage)
-        accounts = decrypt_accounts()
-        target = next((acc for acc in accounts if acc["id"] == account_id), None)
+        accounts = decrypt_accounts(); target = next((acc for acc in accounts if acc["id"] == account_id), None)
         if not target: return f"Account not found: {account_id}", 404
         with sync_playwright() as p:
             stage = "connect_browserless"; mark(stage)
