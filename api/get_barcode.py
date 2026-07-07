@@ -6,6 +6,7 @@ from cryptography.fernet import Fernet
 from playwright.sync_api import sync_playwright, TimeoutError
 import io
 import time
+from urllib.parse import quote
 
 app = Flask(__name__)
 
@@ -13,6 +14,10 @@ app = Flask(__name__)
 ENCRYPTION_KEY_B64 = os.environ.get("ENCRYPTION_KEY")
 ENCRYPTED_ACCOUNTS_B64 = os.environ.get("ENCRYPTED_ACCOUNTS")
 BROWSERLESS_TOKEN = os.environ.get("BROWSERLESS_TOKEN", "2Uq9iBy84O6QGwO008597820ed94cb8fb02789f1092d91545")
+
+TID_CLIENT_ID = "a1c144a9-6ab3-49f3-b03f-4ce80d257f16"
+TID_AUTHORIZE_URL = "https://tapi.t-id.co.kr/oidc/v20/authorize"
+TID_REDIRECT_URL = "https://m.sktuniverse.co.kr/member/login/channel/tid"
 
 DESKTOP_USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -49,6 +54,22 @@ def assert_time_left(deadline, stage):
 def build_browserless_url():
     return f"wss://chrome.browserless.io?token={BROWSERLESS_TOKEN}&stealth=true&timeout=55000"
 
+def build_tid_login_url():
+    redirect_uri = quote(TID_REDIRECT_URL, safe='')
+    return f"{TID_AUTHORIZE_URL}?client_id={TID_CLIENT_ID}&redirect_uri={redirect_uri}"
+
+def safe_url(page):
+    try:
+        return page.url
+    except Exception:
+        return "closed"
+
+def get_body_text(page, limit=180):
+    try:
+        return page.locator('body').inner_text(timeout=1000).replace("\n", " | ")[:limit]
+    except Exception:
+        return ""
+
 def fill_first_visible(page, selectors, value, timeout=8000):
     joined = ", ".join(selectors)
     locator = page.locator(joined).first
@@ -66,52 +87,48 @@ def wait_for_any(page, selectors, timeout=8000):
     locator.wait_for(state='visible', timeout=timeout)
     return locator
 
-def safe_url(page):
-    try:
-        return page.url
-    except Exception:
-        return "closed"
+def find_tid_page(context, parent_page):
+    pages = [p for p in context.pages if not p.is_closed()]
+    for candidate in pages:
+        url = safe_url(candidate)
+        if "auth.skt-id.co.kr" in url or "tapi.t-id.co.kr" in url:
+            return candidate
+    if safe_url(parent_page).startswith("https://auth.skt-id.co.kr"):
+        return parent_page
+    return None
 
-def get_body_text(page, limit=180):
-    try:
-        return page.locator('body').inner_text(timeout=1000).replace("\n", " | ")[:limit]
-    except Exception:
-        return ""
-
-def wait_for_tid_login_page(parent_page, timeout_ms=16000):
-    context = parent_page.context
-    before_pages = set(context.pages)
-    parent_page.click('#link-to-tid-login', timeout=5000)
-
+def poll_for_tid_page(context, parent_page, timeout_ms):
     end_time = time.monotonic() + (timeout_ms / 1000)
     last_seen = []
     while time.monotonic() < end_time:
         pages = [p for p in context.pages if not p.is_closed()]
         last_seen = [safe_url(p) for p in pages]
-
-        for candidate in pages:
-            url = safe_url(candidate)
-            if "auth.skt-id.co.kr" in url or "tapi.t-id.co.kr" in url:
-                try:
-                    candidate.wait_for_load_state('domcontentloaded', timeout=5000)
-                except Exception:
-                    pass
-                return candidate
-
-        if safe_url(parent_page).startswith("https://auth.skt-id.co.kr"):
-            return parent_page
-
-        new_pages = [p for p in pages if p not in before_pages]
-        if new_pages:
-            candidate = new_pages[-1]
+        found = find_tid_page(context, parent_page)
+        if found:
             try:
-                candidate.wait_for_load_state('domcontentloaded', timeout=5000)
+                found.wait_for_load_state('domcontentloaded', timeout=5000)
             except Exception:
                 pass
-            if "T ID" in candidate.title() or candidate.locator('input#inputId, input[type="password"]').count() > 0:
-                return candidate
-
+            return found, last_seen
         time.sleep(0.5)
+    return None, last_seen
+
+def wait_for_tid_login_page(parent_page, timeout_ms=16000):
+    context = parent_page.context
+    parent_page.click('#link-to-tid-login', timeout=5000)
+
+    found, last_seen = poll_for_tid_page(context, parent_page, min(5000, timeout_ms))
+    if found:
+        return found
+
+    print(f"click popup not found, forcing window.open. pages={last_seen}", flush=True)
+    parent_page.evaluate(
+        "(url) => window.open(url, '_blank', 'popup=true,width=500,height=800')",
+        build_tid_login_url(),
+    )
+    found, last_seen = poll_for_tid_page(context, parent_page, max(1000, timeout_ms - 5000))
+    if found:
+        return found
 
     raise TimeoutError(f"T ID popup page not found. pages={last_seen}. parent_body={get_body_text(parent_page)}")
 
