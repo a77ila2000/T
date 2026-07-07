@@ -10,7 +10,6 @@ from urllib.parse import quote
 
 app = Flask(__name__)
 
-# Vercel 환경 변수에서 값 가져오기
 ENCRYPTION_KEY_B64 = os.environ.get("ENCRYPTION_KEY")
 ENCRYPTED_ACCOUNTS_B64 = os.environ.get("ENCRYPTED_ACCOUNTS")
 BROWSERLESS_TOKEN = os.environ.get("BROWSERLESS_TOKEN", "2Uq9iBy84O6QGwO008597820ed94cb8fb02789f1092d91545")
@@ -29,20 +28,20 @@ def decrypt_accounts():
     key = base64.urlsafe_b64decode(ENCRYPTION_KEY_B64)
     encrypted_accounts = base64.urlsafe_b64decode(ENCRYPTED_ACCOUNTS_B64)
     f = Fernet(key)
-    decrypted_json = f.decrypt(encrypted_accounts).decode('utf-8')
+    decrypted_json = f.decrypt(encrypted_accounts).decode("utf-8")
     return json.loads(decrypted_json)
 
 def create_error_image(account_id, error):
     from PIL import Image, ImageDraw
-    img = Image.new('RGB', (520, 260), color=(255, 235, 238))
+    img = Image.new("RGB", (520, 260), color=(255, 235, 238))
     d = ImageDraw.Draw(img)
     error_text = str(error).replace("\n", " ")[:220]
     lines = [error_text[i:i + 52] for i in range(0, len(error_text), 52)]
     error_message = "\n".join(["Barcode failed", f"ID: {account_id}"] + lines[:5])
     d.multiline_text((18, 34), error_message, fill=(211, 47, 47), align="left")
     img_byte_arr = io.BytesIO()
-    img.save(img_byte_arr, format='PNG')
-    return Response(img_byte_arr.getvalue(), mimetype='image/png')
+    img.save(img_byte_arr, format="PNG")
+    return Response(img_byte_arr.getvalue(), mimetype="image/png")
 
 def seconds_left(deadline):
     return max(0.5, deadline - time.monotonic())
@@ -55,7 +54,7 @@ def build_browserless_url():
     return f"wss://chrome.browserless.io?token={BROWSERLESS_TOKEN}&stealth=true&timeout=55000"
 
 def build_tid_login_url():
-    redirect_uri = quote(TID_REDIRECT_URL, safe='')
+    redirect_uri = quote(TID_REDIRECT_URL, safe="")
     return f"{TID_AUTHORIZE_URL}?client_id={TID_CLIENT_ID}&redirect_uri={redirect_uri}"
 
 def safe_url(page):
@@ -66,16 +65,18 @@ def safe_url(page):
 
 def get_body_text(page, limit=180):
     try:
-        return page.locator('body').inner_text(timeout=1000).replace("\n", " | ")[:limit]
+        return page.locator("body").inner_text(timeout=1000).replace("\n", " | ")[:limit]
     except Exception:
         return ""
 
-def fill_first_visible(page, selectors, value, timeout=8000):
+def type_first_visible(page, selectors, value, timeout=8000):
     joined = ", ".join(selectors)
     locator = page.locator(joined).first
     try:
-        locator.wait_for(state='visible', timeout=timeout)
-        locator.fill(value, timeout=timeout)
+        locator.wait_for(state="visible", timeout=timeout)
+        locator.click(timeout=timeout)
+        locator.fill("", timeout=timeout)
+        locator.type(value, delay=45, timeout=timeout)
         return locator.evaluate("e => e.id || e.name || e.type || e.tagName")
     except Exception as e:
         body_text = get_body_text(page, 160)
@@ -84,7 +85,7 @@ def fill_first_visible(page, selectors, value, timeout=8000):
 def wait_for_any(page, selectors, timeout=8000):
     joined = ", ".join(selectors)
     locator = page.locator(joined).first
-    locator.wait_for(state='visible', timeout=timeout)
+    locator.wait_for(state="visible", timeout=timeout)
     return locator
 
 def find_tid_page(context, parent_page):
@@ -106,7 +107,7 @@ def poll_for_tid_page(context, parent_page, timeout_ms):
         found = find_tid_page(context, parent_page)
         if found:
             try:
-                found.wait_for_load_state('domcontentloaded', timeout=5000)
+                found.wait_for_load_state("domcontentloaded", timeout=5000)
             except Exception:
                 pass
             return found, last_seen
@@ -115,7 +116,7 @@ def poll_for_tid_page(context, parent_page, timeout_ms):
 
 def wait_for_tid_login_page(parent_page, timeout_ms=16000):
     context = parent_page.context
-    parent_page.click('#link-to-tid-login', timeout=5000)
+    parent_page.click("#link-to-tid-login", timeout=5000)
 
     found, last_seen = poll_for_tid_page(context, parent_page, min(5000, timeout_ms))
     if found:
@@ -141,7 +142,7 @@ def wait_for_tid_inputs(login_page, timeout_ms=16000):
             raise TimeoutError("T ID popup closed before inputs appeared")
         last_url = safe_url(login_page)
         try:
-            if login_page.locator('input#inputId, input#userId, input[type="text"]').first.is_visible(timeout=1000):
+            if login_page.locator("input#inputId, input#userId, input[type='text']").first.is_visible(timeout=1000):
                 return
         except Exception:
             pass
@@ -167,11 +168,28 @@ def wait_for_popup_close_or_callback(login_page, timeout_ms=12000):
     body_text = get_body_text(login_page)
     raise TimeoutError(f"T ID popup did not close or reach callback. url={last_url}. body={body_text}")
 
-@app.route('/api/get_barcode', methods=['GET'])
+def submit_tid_login(login_page, deadline):
+    login_button = wait_for_any(login_page, [
+        "button[data-click-id='login']",
+        "button.btn-secondary:has-text('Login')",
+        "button:has-text('Login')",
+        "button#loginBtn",
+    ], timeout=8000)
+
+    try:
+        login_page.keyboard.press("Enter")
+        return wait_for_popup_close_or_callback(login_page, timeout_ms=min(6000, int(seconds_left(deadline) * 1000)))
+    except Exception as enter_error:
+        print(f"enter submit did not finish login: {enter_error}", flush=True)
+
+    login_button.click(timeout=8000)
+    return wait_for_popup_close_or_callback(login_page, timeout_ms=min(12000, int(seconds_left(deadline) * 1000)))
+
+@app.route("/api/get_barcode", methods=["GET"])
 def handler():
-    account_id_to_find = request.args.get('id')
+    account_id_to_find = request.args.get("id")
     if not account_id_to_find:
-        return "계정 ID를 지정해주세요.", 400
+        return "Account ID is required.", 400
 
     browser = None
     stage = "start"
@@ -180,10 +198,10 @@ def handler():
     try:
         stage = "decrypt_accounts"
         ACCOUNTS = decrypt_accounts()
-        target_account = next((acc for acc in ACCOUNTS if acc['id'] == account_id_to_find), None)
+        target_account = next((acc for acc in ACCOUNTS if acc["id"] == account_id_to_find), None)
 
         if not target_account:
-            return f"계정({account_id_to_find}) 정보를 찾을 수 없습니다.", 404
+            return f"Account not found: {account_id_to_find}", 404
 
         with sync_playwright() as p:
             stage = "connect_browserless"
@@ -193,8 +211,8 @@ def handler():
 
             stage = "open_tuniverse_login"
             print(f"stage={stage}", flush=True)
-            page.goto("https://m.sktuniverse.co.kr/member/login/view?loginRedirectUrl=%2Fmy", wait_until='domcontentloaded', timeout=25000)
-            page.wait_for_selector('#link-to-tid-login', state='visible', timeout=15000)
+            page.goto("https://m.sktuniverse.co.kr/member/login/view?loginRedirectUrl=%2Fmy", wait_until="domcontentloaded", timeout=25000)
+            page.wait_for_selector("#link-to-tid-login", state="visible", timeout=15000)
             page.wait_for_timeout(1500)
             assert_time_left(deadline, stage)
 
@@ -205,39 +223,31 @@ def handler():
             wait_for_tid_inputs(login_page, timeout_ms=min(16000, int(seconds_left(deadline) * 1000)))
             assert_time_left(deadline, stage)
 
-            stage = "fill_tid_credentials"
+            stage = "type_tid_credentials"
             print(f"stage={stage} url={safe_url(login_page)}", flush=True)
-            user_selector = fill_first_visible(login_page, [
-                'input#inputId',
-                'input#userId',
-                'input[name="userId"]',
-                'input[name="id"]',
-                'input[type="email"]',
-                'input[type="text"]',
-            ], target_account['id'], timeout=8000)
-            print(f"filled user selector: {user_selector}", flush=True)
+            user_selector = type_first_visible(login_page, [
+                "input#inputId",
+                "input#userId",
+                "input[name='userId']",
+                "input[name='id']",
+                "input[type='email']",
+                "input[type='text']",
+            ], target_account["id"], timeout=8000)
+            print(f"typed user selector: {user_selector}", flush=True)
 
-            password_selector = fill_first_visible(login_page, [
-                'input#inputPassword',
-                'input#password',
-                'input[name="password"]',
-                'input[name="passwd"]',
-                'input[type="password"]',
-            ], target_account['password'], timeout=8000)
-            print(f"filled password selector: {password_selector}", flush=True)
+            password_selector = type_first_visible(login_page, [
+                "input#inputPassword",
+                "input#password",
+                "input[name='password']",
+                "input[name='passwd']",
+                "input[type='password']",
+            ], target_account["password"], timeout=8000)
+            print(f"typed password selector: {password_selector}", flush=True)
             assert_time_left(deadline, stage)
 
             stage = "submit_tid_login"
             print(f"stage={stage} url={safe_url(login_page)}", flush=True)
-            login_button = wait_for_any(login_page, [
-                'button[data-click-id="login"]',
-                'button.btn-secondary:has-text("Login")',
-                'button:has-text("Login")',
-                'button:has-text("로그인")',
-                'button#loginBtn',
-            ], timeout=8000)
-            login_button.click(timeout=8000)
-            result = wait_for_popup_close_or_callback(login_page, timeout_ms=min(12000, int(seconds_left(deadline) * 1000)))
+            result = submit_tid_login(login_page, deadline)
             print(f"tid login result={result}", flush=True)
             assert_time_left(deadline, stage)
 
@@ -245,18 +255,18 @@ def handler():
             print(f"stage={stage} parent_url={safe_url(page)}", flush=True)
             if page.is_closed():
                 page = browser.new_page(viewport={"width": 1280, "height": 900}, user_agent=DESKTOP_USER_AGENT)
-            page.goto("https://m.sktuniverse.co.kr/my", wait_until='domcontentloaded', timeout=18000)
+            page.goto("https://m.sktuniverse.co.kr/my", wait_until="domcontentloaded", timeout=18000)
             page.wait_for_timeout(3500)
             assert_time_left(deadline, stage)
 
             stage = "wait_barcode_button"
             print(f"stage={stage} url={safe_url(page)}", flush=True)
-            if '#go-login-btn' in page.locator('body').inner_html(timeout=2000):
+            if "#go-login-btn" in page.locator("body").inner_html(timeout=2000):
                 raise TimeoutError(f"Still logged out after T ID popup. body={get_body_text(page)}")
             barcode_button = wait_for_any(page, [
-                'button.btn_barcode',
-                'button:has-text("바코드")',
-                '[aria-label*="바코드"]',
+                "button.btn_barcode",
+                "[aria-label*='barcode' i]",
+                "[class*='barcode' i]",
             ], timeout=min(12000, int(seconds_left(deadline) * 1000)))
             barcode_button.click(timeout=5000)
             assert_time_left(deadline, stage)
@@ -264,15 +274,15 @@ def handler():
             stage = "wait_barcode_popup"
             print(f"stage={stage} url={safe_url(page)}", flush=True)
             barcode_popup = wait_for_any(page, [
-                'div.modal_pop_wrap.on div.barcode_box',
-                '.barcode_box',
-                '[class*="barcode"]',
+                "div.modal_pop_wrap.on div.barcode_box",
+                ".barcode_box",
+                "[class*='barcode' i]",
             ], timeout=min(8000, int(seconds_left(deadline) * 1000)))
 
             stage = "screenshot_barcode"
-            screenshot_bytes = barcode_popup.screenshot(type='png')
+            screenshot_bytes = barcode_popup.screenshot(type="png")
 
-            return Response(screenshot_bytes, mimetype='image/png')
+            return Response(screenshot_bytes, mimetype="image/png")
 
     except Exception as e:
         print(f"Error processing {account_id_to_find} at {stage}: {type(e).__name__}: {e}", flush=True)
