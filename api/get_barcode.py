@@ -53,7 +53,7 @@ def screenshot_response(page):
         return create_error_image("debug", f"screenshot failed: {screenshot_error}. url={safe_url(page)} body={get_body_text(page, 220)}")
 
 def build_browserless_url():
-    return f"wss://chrome.browserless.io?token={BROWSERLESS_TOKEN}&stealth=true&timeout=55000"
+    return f"wss://chrome.browserless.io?token={BROWSERLESS_TOKEN}&stealth=true&timeout=90000"
 
 def safe_url(page):
     try:
@@ -82,18 +82,6 @@ def new_mobile_page(browser):
     page.set_default_timeout(10000)
     return page
 
-def alive_page(browser, preferred_context=None):
-    if preferred_context:
-        try:
-            for candidate in preferred_context.pages:
-                if not candidate.is_closed():
-                    candidate.set_default_timeout(10000)
-                    return candidate
-            return preferred_context.new_page()
-        except Exception as context_error:
-            print(f"preferred context unavailable: {context_error}", flush=True)
-    return new_mobile_page(browser)
-
 def physical_tap_at(page, x, y):
     try:
         page.touchscreen.tap(x, y)
@@ -118,17 +106,17 @@ def physical_tap(locator, timeout=10000):
     x = box["x"] + box["width"] / 2
     y = box["y"] + box["height"] / 2
     physical_tap_at(locator.page, x, y)
-    locator.page.wait_for_timeout(500)
+    locator.page.wait_for_timeout(400)
     return f"{round(x)},{round(y)}"
 
 def type_first_visible(page, selectors, value, timeout=10000):
     locator = wait_for_any(page, selectors, timeout=timeout)
     physical_tap(locator, timeout=timeout)
     locator.fill("", timeout=timeout)
-    locator.type(value, delay=45, timeout=timeout)
+    locator.type(value, delay=35, timeout=timeout)
     return locator.evaluate("e => e.id || e.name || e.type || e.tagName")
 
-def wait_for_tid_login_form(page, timeout_ms=18000):
+def wait_for_tid_login_form(page, timeout_ms=16000):
     end = time.monotonic() + timeout_ms / 1000
     last_url = ""
     last_body = ""
@@ -140,10 +128,26 @@ def wait_for_tid_login_form(page, timeout_ms=18000):
         except Exception:
             pass
         last_body = get_body_text(page, 220)
-        time.sleep(0.5)
+        time.sleep(0.4)
     raise TimeoutError(f"T ID login form not visible. url={last_url}. body={last_body}")
 
-def wait_for_logged_in_my(page, timeout_ms=12000):
+def wait_for_tid_result(tid_page, timeout_ms=9000):
+    end = time.monotonic() + timeout_ms / 1000
+    last_url = ""
+    while time.monotonic() < end:
+        if tid_page.is_closed():
+            print("debug T ID page closed after submit", flush=True)
+            return "closed"
+        last_url = safe_url(tid_page)
+        if "/member/login/channel/tid" in last_url or "code=" in last_url:
+            print(f"debug T ID callback reached: {last_url}", flush=True)
+            tid_page.wait_for_timeout(1200)
+            return "callback"
+        time.sleep(0.4)
+    print(f"debug T ID result wait timed out at url={last_url} body={get_body_text(tid_page, 200)}", flush=True)
+    return "timeout"
+
+def wait_for_logged_in_my(page, timeout_ms=10000):
     end = time.monotonic() + timeout_ms / 1000
     last_body = ""
     while time.monotonic() < end:
@@ -152,7 +156,7 @@ def wait_for_logged_in_my(page, timeout_ms=12000):
             return True
         if "로그인" not in last_body and "회원가입" not in last_body:
             return True
-        time.sleep(0.7)
+        time.sleep(0.6)
     print(f"debug my page still appears logged out/body={last_body}", flush=True)
     return False
 
@@ -174,23 +178,25 @@ def handler():
         with sync_playwright() as p:
             stage = "connect_browserless"
             browser = p.chromium.connect_over_cdp(build_browserless_url(), timeout=10000)
-            page = new_mobile_page(browser)
-            login_context = page.context
+            main_page = new_mobile_page(browser)
+            context = main_page.context
 
-            stage = "prime_t_universe_login_session"
+            stage = "prime_t_universe_main_page"
             print(f"stage={stage}", flush=True)
-            page.goto(LOGIN_VIEW_URL, wait_until="domcontentloaded", timeout=25000)
-            page.wait_for_timeout(4500)
-            print(f"debug login view url={safe_url(page)} body={get_body_text(page, 180)}", flush=True)
+            main_page.goto(LOGIN_VIEW_URL, wait_until="domcontentloaded", timeout=22000)
+            main_page.wait_for_timeout(2500)
+            print(f"debug main login view url={safe_url(main_page)} body={get_body_text(main_page, 180)}", flush=True)
 
-            stage = "open_tid_authorize_with_t_universe_context"
-            page.goto(TID_AUTHORIZE_URL, wait_until="domcontentloaded", timeout=25000, referer=LOGIN_VIEW_URL)
-            page.wait_for_timeout(3000)
-            wait_for_tid_login_form(page, timeout_ms=18000)
-            print(f"debug tid form url={safe_url(page)} body={get_body_text(page, 180)}", flush=True)
+            stage = "open_tid_page_same_context"
+            tid_page = context.new_page()
+            tid_page.set_default_timeout(10000)
+            tid_page.goto(TID_AUTHORIZE_URL, wait_until="domcontentloaded", timeout=22000, referer=LOGIN_VIEW_URL)
+            tid_page.wait_for_timeout(1800)
+            wait_for_tid_login_form(tid_page, timeout_ms=16000)
+            print(f"debug tid form url={safe_url(tid_page)} body={get_body_text(tid_page, 180)}", flush=True)
 
             stage = "type_tid_credentials"
-            user_selector = type_first_visible(page, [
+            user_selector = type_first_visible(tid_page, [
                 "input#inputId",
                 "input#userId",
                 "input[name='userId']",
@@ -199,7 +205,7 @@ def handler():
                 "input[type='text']",
             ], target_account["id"], timeout=10000)
             print(f"typed user selector: {user_selector}", flush=True)
-            password_selector = type_first_visible(page, [
+            password_selector = type_first_visible(tid_page, [
                 "input#inputPassword",
                 "input#password",
                 "input[name='password']",
@@ -210,22 +216,24 @@ def handler():
 
             stage = "submit_tid_login"
             try:
-                login_button = page.locator("button:has-text('로그인'), button:has-text('Login'), input[type='submit']").last
+                login_button = tid_page.locator("button:has-text('로그인'), button:has-text('Login'), input[type='submit']").last
                 physical_tap(login_button, timeout=8000)
             except Exception as button_error:
                 print(f"login button locator failed, coordinate tap: {button_error}", flush=True)
-                physical_tap_at(page, 195, 330)
-                physical_tap_at(page, 195, 470)
-            page.wait_for_timeout(9000)
-            print(f"debug after tid submit url={safe_url(page)} body={get_body_text(page, 220)}", flush=True)
+                physical_tap_at(tid_page, 195, 330)
+                physical_tap_at(tid_page, 195, 470)
+            result = wait_for_tid_result(tid_page, timeout_ms=9000)
+            print(f"debug tid submit result={result} url={safe_url(tid_page)}", flush=True)
 
-            stage = "open_my_after_login"
-            final_page = alive_page(browser, login_context)
-            final_page.goto(MY_PAGE_URL, wait_until="domcontentloaded", timeout=25000)
-            final_page.wait_for_timeout(7000)
-            wait_for_logged_in_my(final_page, timeout_ms=8000)
-            print(f"debug final my url={safe_url(final_page)} body={get_body_text(final_page, 260)}", flush=True)
-            return screenshot_response(final_page)
+            stage = "open_my_on_main_page_after_login"
+            if main_page.is_closed():
+                main_page = context.new_page()
+                main_page.set_default_timeout(10000)
+            main_page.goto(MY_PAGE_URL, wait_until="domcontentloaded", timeout=22000)
+            main_page.wait_for_timeout(4500)
+            wait_for_logged_in_my(main_page, timeout_ms=7000)
+            print(f"debug final my url={safe_url(main_page)} body={get_body_text(main_page, 260)}", flush=True)
+            return screenshot_response(main_page)
 
     except Exception as e:
         print(f"Error processing {account_id} at {stage}: {type(e).__name__}: {e}", flush=True)
