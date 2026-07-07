@@ -129,25 +129,17 @@ def wait_for_tid_inputs(page, timeout_ms=16000):
         time.sleep(0.5)
     raise TimeoutError(f"T ID inputs not visible. url={last_url}. body={last_body}")
 
-def submit_tid_mobile_login(page, deadline):
+def tap_tid_login_and_show_result(page):
     login_button = wait_for_any(page, [
         "button[data-click-id='login']",
         "button.btn-secondary:has-text('Login')",
         "button:has-text('Login')",
         "button#loginBtn",
     ], timeout=8000)
-
-    before_url = safe_url(page)
     tap_point = physical_tap(login_button, timeout=8000)
-    print(f"tapped T ID submit at {tap_point}", flush=True)
-
-    end_time = time.monotonic() + min(7, seconds_left(deadline))
-    while time.monotonic() < end_time:
-        current_url = safe_url(page)
-        if "m.sktuniverse.co.kr/member/login/channel/tid" in current_url or "m.sktuniverse.co.kr/my" in current_url:
-            return f"navigated:{before_url}->{current_url}"
-        time.sleep(0.4)
-    return f"submit_tapped_then_probe_my:{before_url}->{safe_url(page)}"
+    print(f"debug tapped T ID submit at {tap_point}", flush=True)
+    page.wait_for_timeout(5000)
+    return screenshot_response(page)
 
 @app.route("/api/get_barcode", methods=["GET"])
 def handler():
@@ -207,46 +199,7 @@ def handler():
 
             stage = "submit_tid_login"
             print(f"stage={stage} url={safe_url(page)}", flush=True)
-            login_result = submit_tid_mobile_login(page, deadline)
-            print(f"login_result={login_result}", flush=True)
-            assert_time_left(deadline, stage)
-
-            stage = "probe_mobile_my_after_direct_login"
-            print(f"stage={stage} url={safe_url(page)}", flush=True)
-            page.goto("https://m.sktuniverse.co.kr/my", wait_until="domcontentloaded", timeout=18000)
-            page.wait_for_timeout(4500)
-            assert_time_left(deadline, stage)
-
-            stage = "wait_mobile_barcode_button"
-            print(f"stage={stage} url={safe_url(page)}", flush=True)
-            body_html = page.locator("body").inner_html(timeout=2000)
-            if "go-login-btn" in body_html:
-                print(
-                    f"still logged out after direct T ID login. login_result={login_result}. "
-                    f"url={safe_url(page)} body={get_body_text(page, 300)}",
-                    flush=True,
-                )
-                return screenshot_response(page)
-            barcode_button = wait_for_any(page, [
-                "button.btn_barcode",
-                "button:has-text('바코드')",
-                "[aria-label*='바코드']",
-                "[class*='barcode' i]",
-            ], timeout=min(12000, int(seconds_left(deadline) * 1000)))
-            physical_tap(barcode_button, timeout=5000)
-            assert_time_left(deadline, stage)
-
-            stage = "wait_mobile_barcode_popup"
-            print(f"stage={stage} url={safe_url(page)}", flush=True)
-            barcode_popup = wait_for_any(page, [
-                "div.modal_pop_wrap.on div.barcode_box",
-                ".barcode_box",
-                "[class*='barcode' i]",
-            ], timeout=min(8000, int(seconds_left(deadline) * 1000)))
-
-            stage = "screenshot_barcode"
-            screenshot_bytes = barcode_popup.screenshot(type="png")
-            return Response(screenshot_bytes, mimetype="image/png")
+            return tap_tid_login_and_show_result(page)
 
     except Exception as e:
         print(f"Error processing {account_id_to_find} at {stage}: {type(e).__name__}: {e}", flush=True)
