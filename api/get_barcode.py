@@ -53,7 +53,7 @@ def screenshot_response(page):
         return create_error_image("debug", f"screenshot failed: {screenshot_error}. url={safe_url(page)} body={get_body_text(page, 220)}")
 
 def build_browserless_url():
-    return f"wss://chrome.browserless.io?token={BROWSERLESS_TOKEN}&stealth=true&timeout=90000"
+    return f"wss://chrome.browserless.io?token={BROWSERLESS_TOKEN}&stealth=true&timeout=60000"
 
 def safe_url(page):
     try:
