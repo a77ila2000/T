@@ -6,6 +6,7 @@ from cryptography.fernet import Fernet
 from playwright.sync_api import sync_playwright, TimeoutError
 import io
 import time
+from urllib.parse import quote
 
 app = Flask(__name__)
 
@@ -13,6 +14,10 @@ app = Flask(__name__)
 ENCRYPTION_KEY_B64 = os.environ.get("ENCRYPTION_KEY")
 ENCRYPTED_ACCOUNTS_B64 = os.environ.get("ENCRYPTED_ACCOUNTS")
 BROWSERLESS_TOKEN = os.environ.get("BROWSERLESS_TOKEN", "2Uq9iBy84O6QGwO008597820ed94cb8fb02789f1092d91545")
+
+TID_CLIENT_ID = "a1c144a9-6ab3-49f3-b03f-4ce80d257f16"
+TID_AUTHORIZE_URL = "https://tapi.t-id.co.kr/oidc/v20/authorize"
+TID_REDIRECT_URL = "https://m.sktuniverse.co.kr/member/login/channel/tid"
 
 MOBILE_USER_AGENT = (
     "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) "
@@ -48,14 +53,9 @@ def assert_time_left(deadline, stage):
     if seconds_left(deadline) < 3:
         raise TimeoutError(f"deadline reached before {stage}")
 
-def click_if_visible(page, selector, timeout=4000):
-    try:
-        page.wait_for_selector(selector, state='visible', timeout=timeout)
-        page.click(selector, timeout=timeout)
-        return True
-    except Exception as e:
-        print(f"skip selector {selector}: {e}", flush=True)
-        return False
+def build_tid_login_url():
+    redirect_uri = quote(TID_REDIRECT_URL, safe='')
+    return f"{TID_AUTHORIZE_URL}?client_id={TID_CLIENT_ID}&redirect_uri={redirect_uri}"
 
 def fill_first_visible(page, selectors, value, timeout=8000):
     joined = ", ".join(selectors)
@@ -77,6 +77,16 @@ def wait_for_any(page, selectors, timeout=8000):
     locator = page.locator(joined).first
     locator.wait_for(state='visible', timeout=timeout)
     return locator
+
+def find_error_text(page):
+    try:
+        body_text = page.locator('body').inner_text(timeout=1000).replace("\n", " | ")
+        for keyword in ["captcha", "reCAPTCHA", "incorrect", "error", "오류", "실패", "인증"]:
+            if keyword.lower() in body_text.lower():
+                return body_text[:180]
+    except Exception:
+        pass
+    return ""
 
 @app.route('/api/get_barcode', methods=['GET'])
 def handler():
@@ -108,36 +118,26 @@ def handler():
             )
             page.set_default_timeout(8000)
 
-            stage = "open_my_page"
+            stage = "open_tid_login"
             print(f"stage={stage}", flush=True)
-            page.goto("https://m.sktuniverse.co.kr/my", wait_until='domcontentloaded', timeout=18000)
+            page.goto(build_tid_login_url(), wait_until='domcontentloaded', timeout=25000)
             page.wait_for_timeout(2500)
             assert_time_left(deadline, stage)
 
-            stage = "open_login_page"
-            print(f"stage={stage} url={page.url}", flush=True)
-            if click_if_visible(page, '#go-login-btn', timeout=5000):
-                page.wait_for_timeout(2500)
-            assert_time_left(deadline, stage)
-
-            stage = "select_tid_login"
-            print(f"stage={stage} url={page.url}", flush=True)
-            if click_if_visible(page, '#link-to-tid-login', timeout=7000):
-                page.wait_for_timeout(3000)
-            assert_time_left(deadline, stage)
-
-            stage = "fill_credentials"
+            stage = "fill_tid_credentials"
             print(f"stage={stage} url={page.url}", flush=True)
             user_selector = fill_first_visible(page, [
+                'input#inputId',
                 'input#userId',
                 'input[name="userId"]',
                 'input[name="id"]',
                 'input[type="email"]',
-                'input[type="text"]:not(#add-slot-search-proxy)',
-            ], target_account['id'], timeout=8000)
+                'input[type="text"]',
+            ], target_account['id'], timeout=10000)
             print(f"filled user selector: {user_selector}", flush=True)
 
             password_selector = fill_first_visible(page, [
+                'input#inputPassword',
                 'input#password',
                 'input[name="password"]',
                 'input[name="passwd"]',
@@ -146,15 +146,26 @@ def handler():
             print(f"filled password selector: {password_selector}", flush=True)
             assert_time_left(deadline, stage)
 
-            stage = "submit_login"
+            stage = "submit_tid_login"
             print(f"stage={stage} url={page.url}", flush=True)
             login_button = wait_for_any(page, [
-                'button#loginBtn',
-                'button[type="submit"]:has-text("로그인")',
+                'button[data-click-id="login"]',
+                'button.btn-secondary:has-text("Login")',
+                'button:has-text("Login")',
                 'button:has-text("로그인")',
-                'input[type="submit"]',
+                'button#loginBtn',
             ], timeout=8000)
             login_button.click(timeout=8000)
+            page.wait_for_timeout(5000)
+            assert_time_left(deadline, stage)
+
+            stage = "open_my_after_login"
+            print(f"stage={stage} url={page.url}", flush=True)
+            possible_error = find_error_text(page)
+            if possible_error and "Log in to T" in possible_error:
+                raise TimeoutError(f"T ID login did not leave login page. {possible_error}")
+            page.goto("https://m.sktuniverse.co.kr/my", wait_until='domcontentloaded', timeout=18000)
+            page.wait_for_timeout(3500)
             assert_time_left(deadline, stage)
 
             stage = "wait_barcode_button"
