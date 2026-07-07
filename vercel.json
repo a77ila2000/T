@@ -18,5 +18,10 @@
       "src": "/(.*)",
       "dest": "public/$1"
     }
-  ]
+  ],
+  "functions": {
+    "api/get_barcode.py": {
+      "maxDuration": 60
+    }
+  }
 }
