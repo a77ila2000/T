@@ -43,6 +43,9 @@ def create_error_image(account_id, error):
     img.save(img_byte_arr, format="PNG")
     return Response(img_byte_arr.getvalue(), mimetype="image/png")
 
+def screenshot_response(page):
+    return Response(page.screenshot(type="png", full_page=True), mimetype="image/png")
+
 def seconds_left(deadline):
     return max(0.5, deadline - time.monotonic())
 
@@ -213,7 +216,12 @@ def handler():
             print(f"stage={stage} url={safe_url(page)}", flush=True)
             body_html = page.locator("body").inner_html(timeout=2000)
             if "go-login-btn" in body_html:
-                raise TimeoutError(f"Still logged out on /my after direct T ID login. login_result={login_result}. body={get_body_text(page)}")
+                print(
+                    f"still logged out after direct T ID login. login_result={login_result}. "
+                    f"url={safe_url(page)} body={get_body_text(page, 300)}",
+                    flush=True,
+                )
+                return screenshot_response(page)
             barcode_button = wait_for_any(page, [
                 "button.btn_barcode",
                 "button:has-text('바코드')",
