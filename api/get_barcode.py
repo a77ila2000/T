@@ -21,7 +21,6 @@ DESKTOP_USER_AGENT = (
 )
 
 def decrypt_accounts():
-    """환경 변수에서 암호화된 정보를 가져와 복호화합니다."""
     key = base64.urlsafe_b64decode(ENCRYPTION_KEY_B64)
     encrypted_accounts = base64.urlsafe_b64decode(ENCRYPTED_ACCOUNTS_B64)
     f = Fernet(key)
@@ -29,13 +28,12 @@ def decrypt_accounts():
     return json.loads(decrypted_json)
 
 def create_error_image(account_id, error):
-    """오류 발생 시 보여줄 이미지 생성"""
     from PIL import Image, ImageDraw
-    img = Image.new('RGB', (420, 210), color=(255, 235, 238))
+    img = Image.new('RGB', (520, 260), color=(255, 235, 238))
     d = ImageDraw.Draw(img)
-    error_text = str(error).replace("\n", " ")[:150]
-    lines = [error_text[i:i + 42] for i in range(0, len(error_text), 42)]
-    error_message = "\n".join(["Barcode failed", f"ID: {account_id}"] + lines[:4])
+    error_text = str(error).replace("\n", " ")[:220]
+    lines = [error_text[i:i + 52] for i in range(0, len(error_text), 52)]
+    error_message = "\n".join(["Barcode failed", f"ID: {account_id}"] + lines[:5])
     d.multiline_text((18, 34), error_message, fill=(211, 47, 47), align="left")
     img_byte_arr = io.BytesIO()
     img.save(img_byte_arr, format='PNG')
@@ -59,12 +57,8 @@ def fill_first_visible(page, selectors, value, timeout=8000):
         locator.fill(value, timeout=timeout)
         return locator.evaluate("e => e.id || e.name || e.type || e.tagName")
     except Exception as e:
-        body_text = ""
-        try:
-            body_text = page.locator('body').inner_text(timeout=1000).replace("\n", " | ")[:120]
-        except Exception:
-            pass
-        raise TimeoutError(f"No visible input matched after {timeout}ms. selectors={selectors}. url={page.url}. body={body_text}. err={e}")
+        body_text = get_body_text(page, 160)
+        raise TimeoutError(f"No visible input after {timeout}ms. url={safe_url(page)} body={body_text}. selectors={selectors}. err={e}")
 
 def wait_for_any(page, selectors, timeout=8000):
     joined = ", ".join(selectors)
@@ -72,11 +66,71 @@ def wait_for_any(page, selectors, timeout=8000):
     locator.wait_for(state='visible', timeout=timeout)
     return locator
 
+def safe_url(page):
+    try:
+        return page.url
+    except Exception:
+        return "closed"
+
 def get_body_text(page, limit=180):
     try:
         return page.locator('body').inner_text(timeout=1000).replace("\n", " | ")[:limit]
     except Exception:
         return ""
+
+def wait_for_tid_login_page(parent_page, timeout_ms=16000):
+    context = parent_page.context
+    before_pages = set(context.pages)
+    parent_page.click('#link-to-tid-login', timeout=5000)
+
+    end_time = time.monotonic() + (timeout_ms / 1000)
+    last_seen = []
+    while time.monotonic() < end_time:
+        pages = [p for p in context.pages if not p.is_closed()]
+        last_seen = [safe_url(p) for p in pages]
+
+        for candidate in pages:
+            url = safe_url(candidate)
+            if "auth.skt-id.co.kr" in url or "tapi.t-id.co.kr" in url:
+                try:
+                    candidate.wait_for_load_state('domcontentloaded', timeout=5000)
+                except Exception:
+                    pass
+                return candidate
+
+        if safe_url(parent_page).startswith("https://auth.skt-id.co.kr"):
+            return parent_page
+
+        new_pages = [p for p in pages if p not in before_pages]
+        if new_pages:
+            candidate = new_pages[-1]
+            try:
+                candidate.wait_for_load_state('domcontentloaded', timeout=5000)
+            except Exception:
+                pass
+            if "T ID" in candidate.title() or candidate.locator('input#inputId, input[type="password"]').count() > 0:
+                return candidate
+
+        time.sleep(0.5)
+
+    raise TimeoutError(f"T ID popup page not found. pages={last_seen}. parent_body={get_body_text(parent_page)}")
+
+def wait_for_tid_inputs(login_page, timeout_ms=16000):
+    end_time = time.monotonic() + (timeout_ms / 1000)
+    last_url = ""
+    last_body = ""
+    while time.monotonic() < end_time:
+        if login_page.is_closed():
+            raise TimeoutError("T ID popup closed before inputs appeared")
+        last_url = safe_url(login_page)
+        try:
+            if login_page.locator('input#inputId, input#userId, input[type="text"]').first.is_visible(timeout=1000):
+                return
+        except Exception:
+            pass
+        last_body = get_body_text(login_page, 160)
+        time.sleep(0.5)
+    raise TimeoutError(f"T ID inputs not visible. url={last_url}. body={last_body}")
 
 def wait_for_popup_close_or_callback(login_page, timeout_ms=12000):
     end_time = time.monotonic() + (timeout_ms / 1000)
@@ -116,14 +170,8 @@ def handler():
 
         with sync_playwright() as p:
             stage = "connect_browserless"
-            browser = p.chromium.connect_over_cdp(
-                build_browserless_url(),
-                timeout=10000,
-            )
-            page = browser.new_page(
-                viewport={"width": 1280, "height": 900},
-                user_agent=DESKTOP_USER_AGENT,
-            )
+            browser = p.chromium.connect_over_cdp(build_browserless_url(), timeout=10000)
+            page = browser.new_page(viewport={"width": 1280, "height": 900}, user_agent=DESKTOP_USER_AGENT)
             page.set_default_timeout(8000)
 
             stage = "open_tuniverse_login"
@@ -135,22 +183,13 @@ def handler():
 
             stage = "open_tid_popup"
             print(f"stage={stage} url={page.url}", flush=True)
-            login_page = None
-            try:
-                with page.expect_popup(timeout=7000) as popup_info:
-                    page.click('#link-to-tid-login', timeout=5000)
-                login_page = popup_info.value
-                login_page.wait_for_load_state('domcontentloaded', timeout=15000)
-                print(f"popup opened url={login_page.url}", flush=True)
-            except Exception as e:
-                print(f"popup not detected, using current page: {e}", flush=True)
-                page.click('#link-to-tid-login', timeout=5000)
-                page.wait_for_timeout(3000)
-                login_page = page
+            login_page = wait_for_tid_login_page(page, timeout_ms=min(16000, int(seconds_left(deadline) * 1000)))
+            print(f"tid page url={safe_url(login_page)} title={login_page.title()}", flush=True)
+            wait_for_tid_inputs(login_page, timeout_ms=min(16000, int(seconds_left(deadline) * 1000)))
             assert_time_left(deadline, stage)
 
             stage = "fill_tid_credentials"
-            print(f"stage={stage} url={login_page.url}", flush=True)
+            print(f"stage={stage} url={safe_url(login_page)}", flush=True)
             user_selector = fill_first_visible(login_page, [
                 'input#inputId',
                 'input#userId',
@@ -158,7 +197,7 @@ def handler():
                 'input[name="id"]',
                 'input[type="email"]',
                 'input[type="text"]',
-            ], target_account['id'], timeout=12000)
+            ], target_account['id'], timeout=8000)
             print(f"filled user selector: {user_selector}", flush=True)
 
             password_selector = fill_first_visible(login_page, [
@@ -172,7 +211,7 @@ def handler():
             assert_time_left(deadline, stage)
 
             stage = "submit_tid_login"
-            print(f"stage={stage} url={login_page.url}", flush=True)
+            print(f"stage={stage} url={safe_url(login_page)}", flush=True)
             login_button = wait_for_any(login_page, [
                 'button[data-click-id="login"]',
                 'button.btn-secondary:has-text("Login")',
@@ -186,7 +225,7 @@ def handler():
             assert_time_left(deadline, stage)
 
             stage = "open_my_after_login"
-            print(f"stage={stage} parent_url={page.url}", flush=True)
+            print(f"stage={stage} parent_url={safe_url(page)}", flush=True)
             if page.is_closed():
                 page = browser.new_page(viewport={"width": 1280, "height": 900}, user_agent=DESKTOP_USER_AGENT)
             page.goto("https://m.sktuniverse.co.kr/my", wait_until='domcontentloaded', timeout=18000)
@@ -194,7 +233,7 @@ def handler():
             assert_time_left(deadline, stage)
 
             stage = "wait_barcode_button"
-            print(f"stage={stage} url={page.url}", flush=True)
+            print(f"stage={stage} url={safe_url(page)}", flush=True)
             if '#go-login-btn' in page.locator('body').inner_html(timeout=2000):
                 raise TimeoutError(f"Still logged out after T ID popup. body={get_body_text(page)}")
             barcode_button = wait_for_any(page, [
@@ -206,7 +245,7 @@ def handler():
             assert_time_left(deadline, stage)
 
             stage = "wait_barcode_popup"
-            print(f"stage={stage} url={page.url}", flush=True)
+            print(f"stage={stage} url={safe_url(page)}", flush=True)
             barcode_popup = wait_for_any(page, [
                 'div.modal_pop_wrap.on div.barcode_box',
                 '.barcode_box',
