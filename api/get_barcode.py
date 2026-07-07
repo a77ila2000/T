@@ -1,5 +1,5 @@
 from flask import Flask, request, Response
-import os, json, base64, io, time
+import os, json, base64, io, time, re
 from cryptography.fernet import Fernet
 from playwright.sync_api import sync_playwright
 
@@ -11,6 +11,20 @@ MY_PAGE_URL = "https://m.sktuniverse.co.kr/my"
 LOGIN_VIEW_URL = "https://m.sktuniverse.co.kr/member/login/view?loginRedirectUrl=%2Fmy"
 TID_AUTHORIZE_URL = "https://tapi.t-id.co.kr/oidc/v20/authorize?client_id=a1c144a9-6ab3-49f3-b03f-4ce80d257f16&redirect_uri=https%3A%2F%2Fm.sktuniverse.co.kr%2Fmember%2Flogin%2Fchannel/tid"
 MOBILE_USER_AGENT = "Mozilla/5.0 (Linux; Android 13; SM-G981B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Mobile Safari/537.36"
+
+CODE128_PATTERNS = [
+    "212222", "222122", "222221", "121223", "121322", "131222", "122213", "122312", "132212", "221213",
+    "221312", "231212", "112232", "122132", "122231", "113222", "123122", "123221", "223211", "221132",
+    "221231", "213212", "223112", "312131", "311222", "321122", "321221", "312212", "322112", "322211",
+    "212123", "212321", "232121", "111323", "131123", "131321", "112313", "132113", "132311", "211313",
+    "231113", "231311", "112133", "112331", "132131", "113123", "113321", "133121", "313121", "211331",
+    "231131", "213113", "213311", "213131", "311123", "311321", "331121", "312113", "312311", "332111",
+    "314111", "221411", "431111", "111224", "111422", "121124", "121421", "141122", "141221", "112214",
+    "112412", "122114", "122411", "142112", "142211", "241211", "221114", "413111", "241112", "134111",
+    "111242", "121142", "121241", "114212", "124112", "124211", "411212", "421112", "421211", "212141",
+    "214121", "412121", "111143", "111341", "131141", "114113", "114311", "411113", "411311", "113141",
+    "114131", "311141", "411131", "211412", "211214", "211232", "2331112"
+]
 
 
 def decrypt_accounts():
@@ -54,6 +68,73 @@ def screenshot_bytes(page):
 def screenshot_response(page):
     try: return Response(screenshot_bytes(page), mimetype="image/png")
     except Exception as exc: return image_response(f"screenshot failed: {exc}. url={safe_url(page)} body={get_body_text(page)}")
+
+
+def barcode_response(number, seconds_left=1200):
+    from PIL import Image, ImageDraw, ImageFont
+    number = re.sub(r"\D", "", str(number))
+    if not number:
+        return image_response("Barcode number is empty")
+    codes = [104] + [ord(ch) - 32 for ch in number]
+    checksum = 104 + sum(value * idx for idx, value in enumerate(codes[1:], 1))
+    codes += [checksum % 103, 106]
+    module = 3
+    quiet = 30
+    bar_height = 150
+    text_height = 46
+    width = quiet * 2 + sum(sum(int(w) for w in CODE128_PATTERNS[code]) for code in codes) * module
+    img = Image.new("RGB", (width, bar_height + text_height), "white")
+    draw = ImageDraw.Draw(img)
+    x = quiet
+    for code in codes:
+        pattern = CODE128_PATTERNS[code]
+        for i, char in enumerate(pattern):
+            w = int(char) * module
+            if i % 2 == 0:
+                draw.rectangle([x, 18, x + w - 1, 18 + bar_height - 1], fill="black")
+            x += w
+    try:
+        font = ImageFont.truetype("arial.ttf", 22)
+    except Exception:
+        font = ImageFont.load_default()
+    bbox = draw.textbbox((0, 0), number, font=font)
+    draw.text(((width - (bbox[2] - bbox[0])) / 2, bar_height + 20), number, fill="black", font=font)
+    out = io.BytesIO(); img.save(out, format="PNG")
+    resp = Response(out.getvalue(), mimetype="image/png")
+    resp.headers["Cache-Control"] = "no-store, max-age=0"
+    resp.headers["X-Barcode-Number"] = number
+    resp.headers["X-Barcode-Seconds-Left"] = str(max(1, int(seconds_left or 1200)))
+    return resp
+
+
+def extract_barcode_number(page):
+    try:
+        body = page.locator("body").inner_text(timeout=1500)
+    except Exception:
+        body = ""
+    candidates = re.findall(r"(?<!\d)(\d(?:[\s-]?\d){11,20})(?!\d)", body)
+    cleaned = [re.sub(r"\D", "", c) for c in candidates]
+    cleaned = [c for c in cleaned if 12 <= len(c) <= 20]
+    if cleaned:
+        return cleaned[0]
+    try:
+        return page.evaluate("""
+        () => {
+          const text = document.body.innerText || '';
+          const match = text.match(/(?:^|\D)(\d[\d\s-]{11,20}\d)(?:\D|$)/);
+          return match ? match[1].replace(/\D/g, '') : '';
+        }
+        """)
+    except Exception:
+        return ""
+
+
+def extract_seconds_left(page):
+    text = get_body_text(page, 1200)
+    match = re.search(r"남은\s*시간\s*[:：]?\s*(\d{1,2})\s*[:：]\s*(\d{2})", text)
+    if match:
+        return int(match.group(1)) * 60 + int(match.group(2))
+    return 20 * 60
 
 
 def cookie_lines(context):
@@ -248,8 +329,14 @@ def handler():
             print(f"debug final my url={safe_url(page)} body={get_body_text(page, 260)}", flush=True)
             stage = "open_barcode_view"; mark(stage)
             barcode_result = open_barcode_view(page)
-            print(f"debug barcode open result={barcode_result} url={safe_url(page)} body={get_body_text(page, 260)}", flush=True)
-            if debug_mode: return diagnostic_response(page, context, account_id, f"{result}; barcode={barcode_result}", time.monotonic() - started, network_events)
+            seconds_left = extract_seconds_left(page)
+            barcode_number = extract_barcode_number(page)
+            print(f"debug barcode open result={barcode_result} number={barcode_number} seconds={seconds_left} url={safe_url(page)} body={get_body_text(page, 260)}", flush=True)
+            if debug_mode:
+                debug_result = f"{result}; barcode={barcode_result}; number={barcode_number}; seconds={seconds_left}"
+                return diagnostic_response(page, context, account_id, debug_result, time.monotonic() - started, network_events)
+            if barcode_number:
+                return barcode_response(barcode_number, seconds_left)
             return screenshot_response(page)
     except Exception as exc:
         print(f"Error processing {account_id} at {stage}: {type(exc).__name__}: {exc}", flush=True)
