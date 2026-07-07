@@ -32,13 +32,24 @@ def decrypt_accounts():
     return json.loads(decrypted_json)
 
 def create_error_image(account_id, error):
+    return create_text_image(["Barcode failed", f"ID: {account_id}", str(error)])
+
+def create_text_image(lines):
     from PIL import Image, ImageDraw
-    img = Image.new("RGB", (520, 260), color=(255, 235, 238))
+    safe_lines = []
+    for line in lines:
+        text = str(line).replace("\n", " | ")
+        while len(text) > 86:
+            safe_lines.append(text[:86])
+            text = text[86:]
+        safe_lines.append(text)
+    height = max(260, 28 + len(safe_lines) * 18)
+    img = Image.new("RGB", (900, height), color=(245, 247, 250))
     d = ImageDraw.Draw(img)
-    error_text = str(error).replace("\n", " ")[:220]
-    lines = [error_text[i:i + 52] for i in range(0, len(error_text), 52)]
-    error_message = "\n".join(["Barcode failed", f"ID: {account_id}"] + lines[:5])
-    d.multiline_text((18, 34), error_message, fill=(211, 47, 47), align="left")
+    y = 14
+    for line in safe_lines:
+        d.text((16, y), line[:120], fill=(24, 31, 42))
+        y += 18
     img_byte_arr = io.BytesIO()
     img.save(img_byte_arr, format="PNG")
     return Response(img_byte_arr.getvalue(), mimetype="image/png")
@@ -143,7 +154,95 @@ def wait_for_tid_inputs(page, timeout_ms=16000):
         time.sleep(0.5)
     raise TimeoutError(f"T ID inputs not visible. url={last_url}. body={last_body}")
 
-def tap_tid_login_and_show_result(page):
+def install_tap_debug(page):
+    page.evaluate("""
+        () => {
+            window.__tapDebug = [];
+            const summarize = (e) => {
+                const t = e.target;
+                window.__tapDebug.push({
+                    type: e.type,
+                    x: e.clientX || 0,
+                    y: e.clientY || 0,
+                    tag: t ? t.tagName : '',
+                    id: t ? t.id : '',
+                    cls: t ? String(t.className || '').slice(0, 80) : '',
+                    text: t ? String(t.innerText || t.value || '').trim().slice(0, 80) : ''
+                });
+            };
+            ['touchstart', 'touchend', 'pointerdown', 'pointerup', 'mousedown', 'mouseup', 'click'].forEach((name) => {
+                window.addEventListener(name, summarize, true);
+            });
+        }
+    """)
+
+def collect_tap_debug(page, network_events, x=195, y=470):
+    dom = page.evaluate("""
+        ([x, y]) => {
+            const e = document.elementFromPoint(x, y);
+            const chain = [];
+            let n = e;
+            while (n && chain.length < 5) {
+                const r = n.getBoundingClientRect ? n.getBoundingClientRect() : null;
+                chain.push({
+                    tag: n.tagName || '',
+                    id: n.id || '',
+                    cls: String(n.className || '').slice(0, 100),
+                    role: n.getAttribute ? n.getAttribute('role') || '' : '',
+                    type: n.getAttribute ? n.getAttribute('type') || '' : '',
+                    disabled: !!n.disabled,
+                    ariaDisabled: n.getAttribute ? n.getAttribute('aria-disabled') || '' : '',
+                    pointerEvents: getComputedStyle(n).pointerEvents,
+                    text: String(n.innerText || n.value || '').trim().slice(0, 120),
+                    rect: r ? `${Math.round(r.x)},${Math.round(r.y)},${Math.round(r.width)},${Math.round(r.height)}` : ''
+                });
+                n = n.parentElement;
+            }
+            return {
+                url: location.href,
+                title: document.title,
+                active: document.activeElement ? `${document.activeElement.tagName}#${document.activeElement.id || ''}.${document.activeElement.className || ''}` : '',
+                pointChain: chain,
+                tapDebug: window.__tapDebug || [],
+                body: document.body ? document.body.innerText.slice(0, 500) : ''
+            };
+        }
+    """, [x, y])
+
+    lines = [
+        "T ID LOGIN TAP DIAGNOSTIC",
+        f"url: {dom.get('url')}",
+        f"title: {dom.get('title')}",
+        f"active: {dom.get('active')}",
+        "",
+        "elementFromPoint chain at 195,470:",
+    ]
+    for item in dom.get("pointChain", []):
+        lines.append(
+            f"- {item.get('tag')} id={item.get('id')} role={item.get('role')} type={item.get('type')} "
+            f"disabled={item.get('disabled')} ariaDisabled={item.get('ariaDisabled')} pe={item.get('pointerEvents')} "
+            f"rect={item.get('rect')} text={item.get('text')} cls={item.get('cls')}"
+        )
+    lines += ["", "captured pointer/touch/click events:"]
+    events = dom.get("tapDebug", [])[-20:]
+    if events:
+        for event in events:
+            lines.append(
+                f"- {event.get('type')} x={round(event.get('x') or 0)} y={round(event.get('y') or 0)} "
+                f"target={event.get('tag')}#{event.get('id')} text={event.get('text')} cls={event.get('cls')}"
+            )
+    else:
+        lines.append("- none")
+    lines += ["", "network events after credential entry/tap:"]
+    if network_events:
+        for event in network_events[-30:]:
+            lines.append(f"- {event}")
+    else:
+        lines.append("- none")
+    lines += ["", "body:", dom.get("body", "")]
+    return create_text_image(lines)
+
+def tap_tid_login_and_show_result(page, network_events):
     wait_for_any(page, [
         "input#inputPassword",
         "input#password",
@@ -152,12 +251,11 @@ def tap_tid_login_and_show_result(page):
         "input[type='password']",
     ], timeout=8000)
 
-    # The blue T ID login control is drawn as a mobile touch target near this point.
-    # Tap the visible button center directly instead of relying on the element tag.
+    install_tap_debug(page)
     physical_tap_at(page, 195, 470)
     print("debug tapped lower blue login button by coordinate", flush=True)
     page.wait_for_timeout(5000)
-    return screenshot_response(page)
+    return collect_tap_debug(page, network_events)
 
 @app.route("/api/get_barcode", methods=["GET"])
 def handler():
@@ -186,6 +284,10 @@ def handler():
                 has_touch=True,
             )
             page.set_default_timeout(8000)
+            network_events = []
+            page.on("request", lambda req: network_events.append(f"REQ {req.method} {req.url[:140]}"))
+            page.on("response", lambda res: network_events.append(f"RES {res.status} {res.url[:140]}"))
+            page.on("requestfailed", lambda req: network_events.append(f"FAIL {req.failure or ''} {req.url[:140]}"))
 
             stage = "open_direct_mobile_tid_login"
             print(f"stage={stage}", flush=True)
@@ -217,7 +319,7 @@ def handler():
 
             stage = "submit_tid_login"
             print(f"stage={stage} url={safe_url(page)}", flush=True)
-            return tap_tid_login_and_show_result(page)
+            return tap_tid_login_and_show_result(page, network_events)
 
     except Exception as e:
         print(f"Error processing {account_id_to_find} at {stage}: {type(e).__name__}: {e}", flush=True)
