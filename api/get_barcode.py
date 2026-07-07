@@ -78,9 +78,7 @@ def cookie_debug_lines(context):
         if same_site:
             flags.append(f"SameSite={same_site}")
         value_len = len(cookie.get("value", ""))
-        lines.append(
-            f"{cookie.get('name')} @ {cookie.get('domain')} path={cookie.get('path')} len={value_len} {' '.join(flags)}"
-        )
+        lines.append(f"{cookie.get('name')} @ {cookie.get('domain')} path={cookie.get('path')} len={value_len} {' '.join(flags)}")
     return lines
 
 def diagnostic_response(page, context, account_id, result, elapsed):
@@ -203,6 +201,39 @@ def wait_for_tid_login_form(page, timeout_ms=8000):
         time.sleep(0.2)
     raise TimeoutError(f"T ID login form not visible. url={last_url}. body={last_body}")
 
+def force_submit_tid_login(page):
+    try:
+        page.locator("input[type='password']").first.press("Enter", timeout=1200)
+        print("debug pressed Enter in password field", flush=True)
+    except Exception as press_error:
+        print(f"debug password Enter failed: {press_error}", flush=True)
+    try:
+        clicked = page.evaluate(
+            """
+            () => {
+              const items = Array.from(document.querySelectorAll('button,input[type=submit],[role=button],a'))
+                .map((el) => {
+                  const r = el.getBoundingClientRect();
+                  const text = (el.innerText || el.value || el.getAttribute('aria-label') || '').trim();
+                  return { el, text, top: r.top, left: r.left, width: r.width, height: r.height, disabled: !!el.disabled };
+                })
+                .filter((item) => item.width > 100 && item.height > 20 && item.top > 330 && !item.disabled);
+              const target = items.find((item) => /로그인|login/i.test(item.text)) || items[0];
+              if (!target) return 'no-target';
+              target.el.scrollIntoView({ block: 'center' });
+              const opts = { bubbles: true, cancelable: true, view: window };
+              target.el.dispatchEvent(new MouseEvent('mousedown', opts));
+              target.el.dispatchEvent(new MouseEvent('mouseup', opts));
+              target.el.dispatchEvent(new MouseEvent('click', opts));
+              if (target.el.click) target.el.click();
+              return `${target.text}|${target.top}|${target.width}x${target.height}`;
+            }
+            """
+        )
+        print(f"debug dom submit click target={clicked}", flush=True)
+    except Exception as js_error:
+        print(f"debug dom submit click failed: {js_error}", flush=True)
+
 def wait_for_tid_result(tid_page, timeout_ms=10000):
     end = time.monotonic() + timeout_ms / 1000
     last_url = ""
@@ -289,17 +320,14 @@ def handler():
             mark(stage)
             try:
                 login_button = tid_page.locator("button:has-text('로그인'), button:has-text('Login'), input[type='submit']").last
-                physical_tap(login_button, timeout=4500)
+                login_button.click(force=True, timeout=2500)
+                print("debug locator force click submit", flush=True)
             except Exception as button_error:
                 print(f"login button locator failed, coordinate tap: {button_error}", flush=True)
             tid_page.wait_for_timeout(250)
             physical_tap_at(tid_page, 206, 470)
             tid_page.wait_for_timeout(250)
-            try:
-                tid_page.keyboard.press("Enter")
-                print("debug pressed Enter after submit tap", flush=True)
-            except Exception as enter_error:
-                print(f"debug Enter submit failed: {enter_error}", flush=True)
+            force_submit_tid_login(tid_page)
             result = wait_for_tid_result(tid_page, timeout_ms=10000)
             print(f"debug tid submit result={result} url={safe_url(tid_page)}", flush=True)
             if debug_mode and result == "timeout":
