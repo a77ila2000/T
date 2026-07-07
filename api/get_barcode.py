@@ -168,52 +168,52 @@ def wait_for_tid_result(page, timeout_ms=10000):
         url = safe_url(page)
         if page.is_closed(): return "closed"
         if "/member/login/channel/tid" in url or "code=" in url or "/my" in url:
-            print(f"debug T ID callback reached: {url}", flush=True); page.wait_for_timeout(1000); return "callback"
+            print(f"debug T ID callback reached: {url}", flush=True); page.wait_for_timeout(800); return "callback"
         time.sleep(0.2)
     print(f"debug T ID result wait timed out at url={safe_url(page)} body={get_body_text(page, 200)}", flush=True); return "timeout"
 
 
 def open_tid_from_my(page):
-    goto_page(page, MY_PAGE_URL, timeout=7000); page.wait_for_timeout(500)
-    goto_page(page, LOGIN_VIEW_URL, timeout=8000, referer=MY_PAGE_URL); page.wait_for_timeout(700)
+    goto_page(page, MY_PAGE_URL, timeout=7000); page.wait_for_timeout(400)
+    goto_page(page, LOGIN_VIEW_URL, timeout=8000, referer=MY_PAGE_URL); page.wait_for_timeout(500)
     print(f"debug login view seeded url={safe_url(page)} body={get_body_text(page, 180)}", flush=True)
     before = safe_url(page)
     try:
         btn = page.locator("#link-to-tid-login, button:has-text('T 아이디'), button:has-text('T아이디'), text=T 아이디로 이용하기, text=T아이디로 이용하기").first
-        tap_locator(btn, timeout=2500); print("debug tapped real T ID button", flush=True)
+        tap_locator(btn, timeout=2200); print("debug tapped real T ID button", flush=True)
     except Exception as exc: print(f"debug real T ID button tap failed: {exc}", flush=True)
-    page.wait_for_timeout(1200)
+    page.wait_for_timeout(900)
     if "auth.skt-id.co.kr" not in safe_url(page) and "tapi.t-id.co.kr" not in safe_url(page):
         referer = safe_url(page) if "sktuniverse" in safe_url(page) else LOGIN_VIEW_URL
         print(f"debug fallback authorize after button attempt url={safe_url(page)} body={get_body_text(page, 180)}", flush=True)
-        goto_page(page, TID_AUTHORIZE_URL, timeout=12000, referer=referer); page.wait_for_timeout(300)
+        goto_page(page, TID_AUTHORIZE_URL, timeout=12000, referer=referer); page.wait_for_timeout(250)
     print(f"debug tid entry url={safe_url(page)} from={before} body={get_body_text(page, 180)}", flush=True); return page
 
 
 def open_barcode_view(page):
     before_url = safe_url(page)
     before_text = get_body_text(page, 220)
-    selectors = [
-        "a[href*='barcode']", "button:has-text('바코드')", "a:has-text('바코드')",
-        "[aria-label*='바코드']", "[title*='바코드']", "[class*='barcode']", "[id*='barcode']",
-        "button:has(svg):nth-of-type(1)", "a:has(svg):nth-of-type(1)",
-    ]
-    for selector in selectors:
-        try:
-            loc = page.locator(selector).first
-            if loc.count() and loc.is_visible(timeout=600):
-                tap_locator(loc, timeout=1200)
-                page.wait_for_timeout(1800)
-                print(f"debug barcode selector tapped {selector} url={safe_url(page)} body={get_body_text(page, 180)}", flush=True)
-                if safe_url(page) != before_url or get_body_text(page, 220) != before_text:
-                    return selector
-        except Exception as exc:
-            print(f"debug barcode selector skipped {selector}: {exc}", flush=True)
-    for x, y in [(300, 32), (306, 104), (288, 104), (300, 92)]:
-        physical_tap_at(page, x, y); page.wait_for_timeout(1800)
-        print(f"debug barcode coordinate tapped {x},{y} url={safe_url(page)} body={get_body_text(page, 180)}", flush=True)
+    try:
+        clicked = page.evaluate("""
+        () => {
+          const nodes = Array.from(document.querySelectorAll('a,button,[role=button]'));
+          const target = nodes.find((el) => /barcode|barCode|바코드/i.test(`${el.href || ''} ${el.id || ''} ${el.className || ''} ${el.getAttribute('aria-label') || ''} ${el.innerText || ''}`));
+          if (!target) return 'no-dom-target';
+          target.click();
+          return `${target.tagName}:${target.href || target.id || target.className || target.innerText}`.slice(0, 120);
+        }
+        """)
+        page.wait_for_timeout(900)
+        print(f"debug barcode dom click={clicked} url={safe_url(page)} body={get_body_text(page, 180)}", flush=True)
         if safe_url(page) != before_url or get_body_text(page, 220) != before_text:
-            return f"tap({x},{y})"
+            return f"dom:{clicked}"
+    except Exception as exc:
+        print(f"debug barcode dom click failed: {exc}", flush=True)
+    physical_tap_at(page, 300, 32)
+    page.wait_for_timeout(1400)
+    print(f"debug barcode coordinate tapped 300,32 url={safe_url(page)} body={get_body_text(page, 180)}", flush=True)
+    if safe_url(page) != before_url or get_body_text(page, 220) != before_text:
+        return "tap(300,32)"
     return "not-opened"
 
 
@@ -240,11 +240,11 @@ def handler():
             try:
                 page.locator("button:has-text('로그인'), button:has-text('Login'), input[type='submit']").last.click(force=True, timeout=2500); print("debug locator force click submit", flush=True)
             except Exception as exc: print(f"login button locator failed: {exc}", flush=True)
-            page.wait_for_timeout(250); physical_tap_at(page, 206, 470); page.wait_for_timeout(250); force_submit(page)
+            page.wait_for_timeout(200); physical_tap_at(page, 206, 470); page.wait_for_timeout(200); force_submit(page)
             result = wait_for_tid_result(page, 10000); print(f"debug tid submit result={result} url={safe_url(page)}", flush=True)
             if debug_mode and result == "timeout": return diagnostic_response(page, context, account_id, result, time.monotonic() - started, network_events)
             stage = "open_my_after_login"; mark(stage)
-            goto_page(page, MY_PAGE_URL, timeout=9000); page.wait_for_timeout(4500)
+            goto_page(page, MY_PAGE_URL, timeout=9000); page.wait_for_timeout(2300)
             print(f"debug final my url={safe_url(page)} body={get_body_text(page, 260)}", flush=True)
             stage = "open_barcode_view"; mark(stage)
             barcode_result = open_barcode_view(page)
