@@ -57,17 +57,20 @@ def handler():
             
            page.goto("https://m.sktuniverse.co.kr/my", wait_until='domcontentloaded', timeout=25000)
             
-            # [추가] 로그인 수단 선택 화면(T아이디로 이용하기 버튼)이 있으면 먼저 클릭합니다.
-            # SKT의 해당 버튼 텍스트나 속성을 기반으로 클릭 처리
+            # [보완] 로그인 수단 선택 화면 처리 및 전환 대기
             try:
-                # "T아이디로 이용하기" 버튼이 나타날 때까지 최대 5초 대기 후 클릭
+                # "T아이디로 이용하기" 버튼이 나타날 때까지 최대 5초 대기
                 page.wait_for_selector('text="T아이디로 이용하기"', timeout=5000)
                 page.click('text="T아이디로 이용하기"')
-            except Exception:
-                # 만약 버튼 화면 없이 바로 아이디 입력창이 떴다면 에러를 무시하고 다음 단계로 진행합니다.
+                
+                # ★ 중요: 버튼 클릭 후 실제 아이디 입력창('input#userId')이 화면에 로딩될 때까지 최대 5초간 명시적으로 대기합니다.
+                page.wait_for_selector('input#userId', timeout=5000)
+            except Exception as e:
+                # 만약 이미 입력창이 바로 떠 있었거나 전환이 끝났다면 에러를 무시하고 진행합니다.
+                print(f"로그인 진입 단계 우회 또는 확인: {e}")
                 pass
 
-            # 기존 로그인 입력 로직
+            # 기존 로그인 입력 로직 (이제 안전하게 입력 가능)
             page.wait_for_selector('input#userId', timeout=15000)
             page.fill('input#userId', target_account['id'])
             page.fill('input#password', target_account['password'])
