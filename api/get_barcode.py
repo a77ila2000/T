@@ -153,6 +153,15 @@ def wait_for_tid_result(tid_page, timeout_ms=3200):
     print(f"debug T ID result wait timed out at url={last_url} body={get_body_text(tid_page, 200)}", flush=True)
     return "timeout"
 
+def open_authorize_fallback(main_page, chooser_url):
+    print("debug opening authorize fallback in same context", flush=True)
+    tid_page = main_page.context.new_page()
+    tid_page.set_default_timeout(6000)
+    tid_page.goto(TID_AUTHORIZE_URL, wait_until="domcontentloaded", timeout=12000, referer=chooser_url)
+    tid_page.wait_for_timeout(300)
+    print(f"debug fallback tid url={safe_url(tid_page)} body={get_body_text(tid_page, 180)}", flush=True)
+    return tid_page
+
 def open_tid_from_my(main_page):
     main_page.goto(MY_PAGE_URL, wait_until="domcontentloaded", timeout=12000)
     main_page.wait_for_timeout(500)
@@ -167,14 +176,18 @@ def open_tid_from_my(main_page):
         y = 156 if "보러가기" in body else 96
         physical_tap_at(main_page, 105, y)
 
-    wait_for_text_contains(main_page, "T아이디", timeout_ms=7000)
-    main_page.wait_for_timeout(250)
+    main_page.wait_for_timeout(600)
     chooser_url = safe_url(main_page)
     print(f"debug login chooser url={chooser_url} body={get_body_text(main_page, 220)}", flush=True)
 
     before_pages = list(main_page.context.pages)
-    tid_button = main_page.locator("#link-to-tid-login").first
-    physical_tap(tid_button, timeout=5000)
+    try:
+        tid_button = main_page.locator("#link-to-tid-login").first
+        physical_tap(tid_button, timeout=3500)
+    except Exception as tid_button_error:
+        print(f"T ID button not visible after login entry: {tid_button_error}", flush=True)
+        return open_authorize_fallback(main_page, chooser_url)
+
     main_page.wait_for_timeout(800)
     after_pages = list(main_page.context.pages)
     new_pages = [candidate for candidate in after_pages if candidate not in before_pages]
@@ -183,12 +196,8 @@ def open_tid_from_my(main_page):
     print(f"debug after T button pages_before={len(before_pages)} pages_after={len(after_pages)} tid_url={safe_url(tid_page)} body={get_body_text(tid_page, 180)}", flush=True)
 
     if "auth.skt-id.co.kr" not in safe_url(tid_page) and "tapi.t-id.co.kr" not in safe_url(tid_page):
-        print("debug T button did not navigate in Browserless, opening authorize fallback in same context", flush=True)
-        tid_page = main_page.context.new_page()
-        tid_page.set_default_timeout(6000)
-        tid_page.goto(TID_AUTHORIZE_URL, wait_until="domcontentloaded", timeout=12000, referer=chooser_url)
-        tid_page.wait_for_timeout(300)
-        print(f"debug fallback tid url={safe_url(tid_page)} body={get_body_text(tid_page, 180)}", flush=True)
+        print("debug T button did not navigate in Browserless", flush=True)
+        tid_page = open_authorize_fallback(main_page, chooser_url)
     return tid_page
 
 @app.route("/api/get_barcode", methods=["GET"])
