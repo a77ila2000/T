@@ -50,7 +50,7 @@ def handler():
             return f"계정({account_id_to_find}) 정보를 찾을 수 없습니다.", 404
 
         with sync_playwright() as p:
-            browser = p.chromium.launch(headless=True)
+            browser = p.chromium.connect_over_cdp("wss://chrome.browserless.io?token=YOUR-API-TOKEN")
             page = browser.new_page()
             
             page.goto("https://m.sktuniverse.co.kr/my", wait_until='domcontentloaded', timeout=20000)
