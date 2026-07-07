@@ -42,13 +42,79 @@ def create_error_image(account_id, error):
     img.save(out, format="PNG")
     return Response(out.getvalue(), mimetype="image/png")
 
+def capture_screenshot_bytes(page):
+    client = page.context.new_cdp_session(page)
+    data = client.send("Page.captureScreenshot", {"format": "png", "fromSurface": True})
+    return base64.b64decode(data["data"])
+
 def screenshot_response(page):
     try:
-        client = page.context.new_cdp_session(page)
-        data = client.send("Page.captureScreenshot", {"format": "png", "fromSurface": True})
-        return Response(base64.b64decode(data["data"]), mimetype="image/png")
+        return Response(capture_screenshot_bytes(page), mimetype="image/png")
     except Exception as screenshot_error:
         return create_error_image("debug", f"screenshot failed: {screenshot_error}. url={safe_url(page)} body={get_body_text(page, 220)}")
+
+def wrap_line(text, width=76):
+    text = str(text)
+    return [text[i:i + width] for i in range(0, len(text), width)] or [""]
+
+def cookie_debug_lines(context):
+    try:
+        cookies = context.cookies()
+    except Exception as cookie_error:
+        return [f"cookie read failed: {cookie_error}"]
+    interesting = []
+    for cookie in cookies:
+        domain = cookie.get("domain", "")
+        if any(part in domain for part in ["sktuniverse", "t-id.co.kr", "skt-id.co.kr"]):
+            interesting.append(cookie)
+    lines = [f"interesting cookies: {len(interesting)} / total {len(cookies)}"]
+    for cookie in sorted(interesting, key=lambda item: (item.get("domain", ""), item.get("name", ""))):
+        flags = []
+        if cookie.get("httpOnly"):
+            flags.append("HttpOnly")
+        if cookie.get("secure"):
+            flags.append("Secure")
+        same_site = cookie.get("sameSite")
+        if same_site:
+            flags.append(f"SameSite={same_site}")
+        value_len = len(cookie.get("value", ""))
+        lines.append(
+            f"{cookie.get('name')} @ {cookie.get('domain')} path={cookie.get('path')} len={value_len} {' '.join(flags)}"
+        )
+    return lines
+
+def diagnostic_response(page, context, account_id, result, elapsed):
+    from PIL import Image, ImageDraw
+    try:
+        screenshot = Image.open(io.BytesIO(capture_screenshot_bytes(page))).convert("RGB")
+    except Exception:
+        screenshot = Image.new("RGB", (412, 915), color=(245, 245, 245))
+    panel_width = 720
+    width = screenshot.width + panel_width
+    height = max(screenshot.height, 980)
+    img = Image.new("RGB", (width, height), color=(255, 255, 255))
+    img.paste(screenshot, (0, 0))
+    draw = ImageDraw.Draw(img)
+    x = screenshot.width + 18
+    y = 18
+    lines = [
+        "T Universe login diagnostic",
+        f"account={account_id}",
+        f"elapsed={elapsed:.1f}s result={result}",
+        f"url={safe_url(page)}",
+        f"body={get_body_text(page, 520)}",
+        "",
+        "cookies:",
+    ] + cookie_debug_lines(context)
+    for line in lines:
+        for piece in wrap_line(line, 82):
+            draw.text((x, y), piece, fill=(20, 20, 20))
+            y += 18
+        if y > height - 30:
+            break
+    out = io.BytesIO()
+    img.save(out, format="PNG")
+    return Response(out.getvalue(), mimetype="image/png")
 
 def build_browserless_url():
     return f"wss://chrome.browserless.io?token={BROWSERLESS_TOKEN}&stealth=true&timeout=60000"
@@ -202,6 +268,7 @@ def open_tid_from_my(main_page):
 @app.route("/api/get_barcode", methods=["GET"])
 def handler():
     account_id = request.args.get("id")
+    debug_mode = request.args.get("debug") == "1"
     if not account_id:
         return "Account ID is required.", 400
 
@@ -275,6 +342,8 @@ def handler():
                 goto_mobile_page(final_page, MY_PAGE_URL, timeout=11000)
             final_page.wait_for_timeout(3500)
             print(f"debug final my url={safe_url(final_page)} body={get_body_text(final_page, 260)}", flush=True)
+            if debug_mode:
+                return diagnostic_response(final_page, context, account_id, result, time.monotonic() - started)
             return screenshot_response(final_page)
 
     except Exception as e:
