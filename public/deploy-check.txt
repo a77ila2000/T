@@ -1,0 +1,3 @@
+deploy-check: 2026-07-07T08:30KST latest-main
+expected-api-commit: 5a8f3988ba822ce0ec03a2c515fef4e0511fdc42
+expected-css-sha: 4ccde6925b50b1fa228397b6d7402598a24a8cb2
