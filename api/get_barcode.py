@@ -6,7 +6,6 @@ from cryptography.fernet import Fernet
 from playwright.sync_api import sync_playwright, TimeoutError
 import io
 import time
-from urllib.parse import quote
 
 app = Flask(__name__)
 
@@ -15,14 +14,10 @@ ENCRYPTION_KEY_B64 = os.environ.get("ENCRYPTION_KEY")
 ENCRYPTED_ACCOUNTS_B64 = os.environ.get("ENCRYPTED_ACCOUNTS")
 BROWSERLESS_TOKEN = os.environ.get("BROWSERLESS_TOKEN", "2Uq9iBy84O6QGwO008597820ed94cb8fb02789f1092d91545")
 
-TID_CLIENT_ID = "a1c144a9-6ab3-49f3-b03f-4ce80d257f16"
-TID_AUTHORIZE_URL = "https://tapi.t-id.co.kr/oidc/v20/authorize"
-TID_REDIRECT_URL = "https://m.sktuniverse.co.kr/member/login/channel/tid"
-
-MOBILE_USER_AGENT = (
-    "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) "
-    "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 "
-    "Mobile/15E148 Safari/604.1"
+DESKTOP_USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/126.0.0.0 Safari/537.36"
 )
 
 def decrypt_accounts():
@@ -56,10 +51,6 @@ def assert_time_left(deadline, stage):
 def build_browserless_url():
     return f"wss://chrome.browserless.io?token={BROWSERLESS_TOKEN}&stealth=true&timeout=55000"
 
-def build_tid_login_url():
-    redirect_uri = quote(TID_REDIRECT_URL, safe='')
-    return f"{TID_AUTHORIZE_URL}?client_id={TID_CLIENT_ID}&redirect_uri={redirect_uri}"
-
 def fill_first_visible(page, selectors, value, timeout=8000):
     joined = ", ".join(selectors)
     locator = page.locator(joined).first
@@ -81,15 +72,29 @@ def wait_for_any(page, selectors, timeout=8000):
     locator.wait_for(state='visible', timeout=timeout)
     return locator
 
-def find_error_text(page):
+def get_body_text(page, limit=180):
     try:
-        body_text = page.locator('body').inner_text(timeout=1000).replace("\n", " | ")
-        for keyword in ["captcha", "reCAPTCHA", "incorrect", "error", "오류", "실패", "인증"]:
-            if keyword.lower() in body_text.lower():
-                return body_text[:180]
+        return page.locator('body').inner_text(timeout=1000).replace("\n", " | ")[:limit]
     except Exception:
-        pass
-    return ""
+        return ""
+
+def wait_for_popup_close_or_callback(login_page, timeout_ms=12000):
+    end_time = time.monotonic() + (timeout_ms / 1000)
+    last_url = ""
+    while time.monotonic() < end_time:
+        if login_page.is_closed():
+            return "closed"
+        try:
+            last_url = login_page.url
+            if "m.sktuniverse.co.kr/member/login/channel/tid" in last_url:
+                return f"callback:{last_url}"
+            if "m.sktuniverse.co.kr/my" in last_url:
+                return f"my:{last_url}"
+        except Exception:
+            return "closed"
+        time.sleep(0.5)
+    body_text = get_body_text(login_page)
+    raise TimeoutError(f"T ID popup did not close or reach callback. url={last_url}. body={body_text}")
 
 @app.route('/api/get_barcode', methods=['GET'])
 def handler():
@@ -116,30 +121,47 @@ def handler():
                 timeout=10000,
             )
             page = browser.new_page(
-                viewport={"width": 390, "height": 844},
-                user_agent=MOBILE_USER_AGENT,
+                viewport={"width": 1280, "height": 900},
+                user_agent=DESKTOP_USER_AGENT,
             )
             page.set_default_timeout(8000)
 
-            stage = "open_tid_login"
+            stage = "open_tuniverse_login"
             print(f"stage={stage}", flush=True)
-            page.goto(build_tid_login_url(), wait_until='domcontentloaded', timeout=25000)
-            page.wait_for_timeout(2500)
+            page.goto("https://m.sktuniverse.co.kr/member/login/view?loginRedirectUrl=%2Fmy", wait_until='domcontentloaded', timeout=25000)
+            page.wait_for_selector('#link-to-tid-login', state='visible', timeout=15000)
+            page.wait_for_timeout(1500)
+            assert_time_left(deadline, stage)
+
+            stage = "open_tid_popup"
+            print(f"stage={stage} url={page.url}", flush=True)
+            login_page = None
+            try:
+                with page.expect_popup(timeout=7000) as popup_info:
+                    page.click('#link-to-tid-login', timeout=5000)
+                login_page = popup_info.value
+                login_page.wait_for_load_state('domcontentloaded', timeout=15000)
+                print(f"popup opened url={login_page.url}", flush=True)
+            except Exception as e:
+                print(f"popup not detected, using current page: {e}", flush=True)
+                page.click('#link-to-tid-login', timeout=5000)
+                page.wait_for_timeout(3000)
+                login_page = page
             assert_time_left(deadline, stage)
 
             stage = "fill_tid_credentials"
-            print(f"stage={stage} url={page.url}", flush=True)
-            user_selector = fill_first_visible(page, [
+            print(f"stage={stage} url={login_page.url}", flush=True)
+            user_selector = fill_first_visible(login_page, [
                 'input#inputId',
                 'input#userId',
                 'input[name="userId"]',
                 'input[name="id"]',
                 'input[type="email"]',
                 'input[type="text"]',
-            ], target_account['id'], timeout=10000)
+            ], target_account['id'], timeout=12000)
             print(f"filled user selector: {user_selector}", flush=True)
 
-            password_selector = fill_first_visible(page, [
+            password_selector = fill_first_visible(login_page, [
                 'input#inputPassword',
                 'input#password',
                 'input[name="password"]',
@@ -150,8 +172,8 @@ def handler():
             assert_time_left(deadline, stage)
 
             stage = "submit_tid_login"
-            print(f"stage={stage} url={page.url}", flush=True)
-            login_button = wait_for_any(page, [
+            print(f"stage={stage} url={login_page.url}", flush=True)
+            login_button = wait_for_any(login_page, [
                 'button[data-click-id="login"]',
                 'button.btn-secondary:has-text("Login")',
                 'button:has-text("Login")',
@@ -159,20 +181,22 @@ def handler():
                 'button#loginBtn',
             ], timeout=8000)
             login_button.click(timeout=8000)
-            page.wait_for_timeout(5000)
+            result = wait_for_popup_close_or_callback(login_page, timeout_ms=min(12000, int(seconds_left(deadline) * 1000)))
+            print(f"tid login result={result}", flush=True)
             assert_time_left(deadline, stage)
 
             stage = "open_my_after_login"
-            print(f"stage={stage} url={page.url}", flush=True)
-            possible_error = find_error_text(page)
-            if possible_error and "Log in to T" in possible_error:
-                raise TimeoutError(f"T ID login did not leave login page. {possible_error}")
+            print(f"stage={stage} parent_url={page.url}", flush=True)
+            if page.is_closed():
+                page = browser.new_page(viewport={"width": 1280, "height": 900}, user_agent=DESKTOP_USER_AGENT)
             page.goto("https://m.sktuniverse.co.kr/my", wait_until='domcontentloaded', timeout=18000)
             page.wait_for_timeout(3500)
             assert_time_left(deadline, stage)
 
             stage = "wait_barcode_button"
             print(f"stage={stage} url={page.url}", flush=True)
+            if '#go-login-btn' in page.locator('body').inner_html(timeout=2000):
+                raise TimeoutError(f"Still logged out after T ID popup. body={get_body_text(page)}")
             barcode_button = wait_for_any(page, [
                 'button.btn_barcode',
                 'button:has-text("바코드")',
