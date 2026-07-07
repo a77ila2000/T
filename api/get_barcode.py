@@ -251,7 +251,7 @@ def open_barcode_view(page):
             return f"dom:{clicked}"
     except Exception as exc:
         print(f"debug barcode dom click failed: {exc}", flush=True)
-    for x, y in [(300, 32), (292, 104)]:
+    for x, y in [(300, 32), (320, 32), (340, 32), (380, 32), (292, 104), (332, 104), (372, 104)]:
         physical_tap_at(page, x, y)
         page.wait_for_timeout(1300)
         print(f"debug barcode coordinate tapped {x},{y} url={safe_url(page)} body={get_body_text(page, 180)}", flush=True)
@@ -315,7 +315,7 @@ def handler():
                 return diagnostic_response(page, context, account_id, f"{result}; barcode={barcode_result}; number={barcode_number}; seconds={seconds_left}", time.monotonic() - started)
             if barcode_number:
                 return barcode_response(barcode_number, seconds_left)
-            return screenshot_response(page)
+            return image_response(f"Barcode number not found\nID: {account_id}\nbarcode_result={barcode_result}\nurl={safe_url(page)}\nbody={get_body_text(page, 260)}"), 502
     except Exception as exc:
         print(f"Error processing {account_id} at {stage}: {type(exc).__name__}: {exc}", flush=True)
         return image_response(f"Barcode failed\nID: {account_id}\n{stage}: {type(exc).__name__}: {exc}")
