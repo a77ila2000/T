@@ -66,10 +66,30 @@ def wait_for_any(page, selectors, timeout=8000):
     locator.wait_for(state="visible", timeout=timeout)
     return locator
 
+def physical_tap(locator, timeout=8000):
+    locator.wait_for(state="visible", timeout=timeout)
+    try:
+        locator.scroll_into_view_if_needed(timeout=timeout)
+    except Exception:
+        pass
+    box = locator.bounding_box(timeout=timeout)
+    if not box:
+        raise TimeoutError("Element has no bounding box")
+    page = locator.page
+    x = box["x"] + box["width"] / 2
+    y = box["y"] + box["height"] / 2
+    try:
+        page.touchscreen.tap(x, y)
+    except Exception as tap_error:
+        print(f"touchscreen tap failed, using mouse click: {tap_error}", flush=True)
+        page.mouse.click(x, y)
+    page.wait_for_timeout(700)
+    return f"{round(x)},{round(y)}"
+
 def type_first_visible(page, selectors, value, timeout=8000):
     locator = wait_for_any(page, selectors, timeout=timeout)
     try:
-        locator.click(timeout=timeout)
+        physical_tap(locator, timeout=timeout)
         locator.fill("", timeout=timeout)
         locator.type(value, delay=45, timeout=timeout)
         return locator.evaluate("e => e.id || e.name || e.type || e.tagName")
@@ -88,7 +108,10 @@ def wait_for_url_contains(page, fragments, timeout_ms=12000):
     raise TimeoutError(f"URL did not contain {fragments}. last_url={last_url}. body={get_body_text(page)}")
 
 def click_tid_mobile_login(page, timeout_ms=18000):
-    page.click("#link-to-tid-login", timeout=5000)
+    button = wait_for_any(page, ["#link-to-tid-login", "button.btn-login-t"], timeout=8000)
+    tap_point = physical_tap(button, timeout=8000)
+    print(f"tapped T ID login at {tap_point}", flush=True)
+
     end_time = time.monotonic() + (timeout_ms / 1000)
     last_url = ""
     last_body = ""
@@ -107,7 +130,7 @@ def click_tid_mobile_login(page, timeout_ms=18000):
             pass
         last_body = get_body_text(page, 160)
         time.sleep(0.5)
-    raise TimeoutError(f"Mobile T ID login page did not open. url={last_url}. body={last_body}")
+    raise TimeoutError(f"Mobile T ID login page did not open. tapped={tap_point}. url={last_url}. body={last_body}")
 
 def wait_for_tid_inputs(page, timeout_ms=16000):
     end_time = time.monotonic() + (timeout_ms / 1000)
@@ -133,16 +156,18 @@ def submit_tid_mobile_login(page, deadline):
     ], timeout=8000)
 
     before_url = safe_url(page)
-    try:
-        page.keyboard.press("Enter")
-        wait_for_url_contains(page, ["m.sktuniverse.co.kr/member/login/channel/tid", "m.sktuniverse.co.kr/my"], timeout_ms=min(7000, int(seconds_left(deadline) * 1000)))
-        return f"enter:{before_url}->{safe_url(page)}"
-    except Exception as enter_error:
-        print(f"enter submit did not finish login: {enter_error}", flush=True)
+    tap_point = physical_tap(login_button, timeout=8000)
+    print(f"tapped T ID submit at {tap_point}", flush=True)
 
-    login_button.click(timeout=8000)
-    wait_for_url_contains(page, ["m.sktuniverse.co.kr/member/login/channel/tid", "m.sktuniverse.co.kr/my"], timeout_ms=min(12000, int(seconds_left(deadline) * 1000)))
-    return f"click:{before_url}->{safe_url(page)}"
+    try:
+        return wait_for_url_contains(
+            page,
+            ["m.sktuniverse.co.kr/member/login/channel/tid", "m.sktuniverse.co.kr/my"],
+            timeout_ms=min(7000, int(seconds_left(deadline) * 1000)),
+        )
+    except Exception as wait_error:
+        print(f"submit did not navigate before /my probe: {wait_error}", flush=True)
+        return f"submit_tapped_no_nav:{before_url}->{safe_url(page)}"
 
 @app.route("/api/get_barcode", methods=["GET"])
 def handler():
@@ -222,14 +247,14 @@ def handler():
             print(f"stage={stage} url={safe_url(page)}", flush=True)
             body_html = page.locator("body").inner_html(timeout=2000)
             if "go-login-btn" in body_html:
-                raise TimeoutError(f"Still logged out on mobile my page. body={get_body_text(page)}")
+                raise TimeoutError(f"Still logged out on mobile my page after physical login tap. login_result={login_result}. body={get_body_text(page)}")
             barcode_button = wait_for_any(page, [
                 "button.btn_barcode",
                 "button:has-text('바코드')",
                 "[aria-label*='바코드']",
                 "[class*='barcode' i]",
             ], timeout=min(12000, int(seconds_left(deadline) * 1000)))
-            barcode_button.click(timeout=5000)
+            physical_tap(barcode_button, timeout=5000)
             assert_time_left(deadline, stage)
 
             stage = "wait_mobile_barcode_popup"
