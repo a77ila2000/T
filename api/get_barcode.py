@@ -190,6 +190,33 @@ def open_tid_from_my(page):
     print(f"debug tid entry url={safe_url(page)} from={before} body={get_body_text(page, 180)}", flush=True); return page
 
 
+def open_barcode_view(page):
+    before_url = safe_url(page)
+    before_text = get_body_text(page, 220)
+    selectors = [
+        "a[href*='barcode']", "button:has-text('바코드')", "a:has-text('바코드')",
+        "[aria-label*='바코드']", "[title*='바코드']", "[class*='barcode']", "[id*='barcode']",
+        "button:has(svg):nth-of-type(1)", "a:has(svg):nth-of-type(1)",
+    ]
+    for selector in selectors:
+        try:
+            loc = page.locator(selector).first
+            if loc.count() and loc.is_visible(timeout=600):
+                tap_locator(loc, timeout=1200)
+                page.wait_for_timeout(1800)
+                print(f"debug barcode selector tapped {selector} url={safe_url(page)} body={get_body_text(page, 180)}", flush=True)
+                if safe_url(page) != before_url or get_body_text(page, 220) != before_text:
+                    return selector
+        except Exception as exc:
+            print(f"debug barcode selector skipped {selector}: {exc}", flush=True)
+    for x, y in [(300, 32), (306, 104), (288, 104), (300, 92)]:
+        physical_tap_at(page, x, y); page.wait_for_timeout(1800)
+        print(f"debug barcode coordinate tapped {x},{y} url={safe_url(page)} body={get_body_text(page, 180)}", flush=True)
+        if safe_url(page) != before_url or get_body_text(page, 220) != before_text:
+            return f"tap({x},{y})"
+    return "not-opened"
+
+
 @app.route("/api/get_barcode", methods=["GET"])
 def handler():
     account_id = request.args.get("id"); debug_mode = request.args.get("debug") == "1"
@@ -219,7 +246,10 @@ def handler():
             stage = "open_my_after_login"; mark(stage)
             goto_page(page, MY_PAGE_URL, timeout=9000); page.wait_for_timeout(4500)
             print(f"debug final my url={safe_url(page)} body={get_body_text(page, 260)}", flush=True)
-            if debug_mode: return diagnostic_response(page, context, account_id, result, time.monotonic() - started, network_events)
+            stage = "open_barcode_view"; mark(stage)
+            barcode_result = open_barcode_view(page)
+            print(f"debug barcode open result={barcode_result} url={safe_url(page)} body={get_body_text(page, 260)}", flush=True)
+            if debug_mode: return diagnostic_response(page, context, account_id, f"{result}; barcode={barcode_result}", time.monotonic() - started, network_events)
             return screenshot_response(page)
     except Exception as exc:
         print(f"Error processing {account_id} at {stage}: {type(exc).__name__}: {exc}", flush=True)
