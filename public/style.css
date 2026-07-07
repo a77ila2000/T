@@ -66,7 +66,10 @@ header h1 {
 .barcode-container img {
     max-width: 100%;
     height: auto;
-    display: none; /* Initially hidden */
+}
+
+.barcode-container img:not(.hidden) {
+    display: block;
 }
 
 .barcode-placeholder {
