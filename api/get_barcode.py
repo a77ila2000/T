@@ -55,8 +55,19 @@ def handler():
             browser = p.chromium.connect_over_cdp("wss://chrome.browserless.io?token=2Uq9iBy84O6QGwO008597820ed94cb8fb02789f1092d91545")
             page = browser.new_page()
             
-            page.goto("https://m.sktuniverse.co.kr/my", wait_until='domcontentloaded', timeout=25000)
+           page.goto("https://m.sktuniverse.co.kr/my", wait_until='domcontentloaded', timeout=25000)
             
+            # [추가] 로그인 수단 선택 화면(T아이디로 이용하기 버튼)이 있으면 먼저 클릭합니다.
+            # SKT의 해당 버튼 텍스트나 속성을 기반으로 클릭 처리
+            try:
+                # "T아이디로 이용하기" 버튼이 나타날 때까지 최대 5초 대기 후 클릭
+                page.wait_for_selector('text="T아이디로 이용하기"', timeout=5000)
+                page.click('text="T아이디로 이용하기"')
+            except Exception:
+                # 만약 버튼 화면 없이 바로 아이디 입력창이 떴다면 에러를 무시하고 다음 단계로 진행합니다.
+                pass
+
+            # 기존 로그인 입력 로직
             page.wait_for_selector('input#userId', timeout=15000)
             page.fill('input#userId', target_account['id'])
             page.fill('input#password', target_account['password'])
