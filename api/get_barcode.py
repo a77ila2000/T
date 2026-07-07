@@ -331,6 +331,8 @@ def handler():
                 physical_tap_at(tid_page, 195, 470)
             result = wait_for_tid_result(tid_page, timeout_ms=10000)
             print(f"debug tid submit result={result} url={safe_url(tid_page)}", flush=True)
+            if debug_mode and result == "timeout":
+                return diagnostic_response(tid_page, context, account_id, result, time.monotonic() - started)
 
             stage = "open_my_after_login"
             mark(stage)
