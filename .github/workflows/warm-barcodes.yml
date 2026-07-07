@@ -1,0 +1,45 @@
+name: Warm T Universe barcodes
+
+on:
+  schedule:
+    - cron: '*/10 * * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: warm-t-universe-barcodes
+  cancel-in-progress: false
+
+jobs:
+  warm:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Pick account for this 10 minute slot
+        id: pick
+        shell: bash
+        run: |
+          ids=("a77ila2000" "a77ila10004" "min560728")
+          names=("me" "mother" "father")
+          slot=$(( $(date -u +%s) / 600 % 3 ))
+          echo "id=${ids[$slot]}" >> "$GITHUB_OUTPUT"
+          echo "name=${names[$slot]}" >> "$GITHUB_OUTPUT"
+          echo "Picked ${names[$slot]} (${ids[$slot]}) for slot $slot"
+
+      - name: Warm selected barcode
+        shell: bash
+        run: |
+          url="https://preedgaonprime.vercel.app/api/get_barcode?id=${{ steps.pick.outputs.id }}&warm=1&t=$(date +%s%3N)"
+          echo "Calling $url"
+          http_code=$(curl --location --silent --show-error --max-time 75 \
+            --output /tmp/barcode.png \
+            --write-out "%{http_code}" \
+            "$url" || true)
+          bytes=$(wc -c < /tmp/barcode.png 2>/dev/null || echo 0)
+          echo "HTTP $http_code, bytes=$bytes"
+          if [ "$http_code" -lt 200 ] || [ "$http_code" -ge 300 ]; then
+            echo "Warmup did not produce a successful response. This can happen when T ID or T Universe is slow."
+            exit 0
+          fi
