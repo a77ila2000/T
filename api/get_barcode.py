@@ -95,13 +95,27 @@ def physical_tap(locator, timeout=8000):
     page = locator.page
     x = box["x"] + box["width"] / 2
     y = box["y"] + box["height"] / 2
+    physical_tap_at(page, x, y)
+    page.wait_for_timeout(700)
+    return f"{round(x)},{round(y)}"
+
+def physical_tap_at(page, x, y):
     try:
         page.touchscreen.tap(x, y)
+        print(f"debug touchscreen tap at {round(x)},{round(y)}", flush=True)
     except Exception as tap_error:
         print(f"touchscreen tap failed, using mouse click: {tap_error}", flush=True)
         page.mouse.click(x, y)
-    page.wait_for_timeout(700)
-    return f"{round(x)},{round(y)}"
+    try:
+        client = page.context.new_cdp_session(page)
+        client.send("Input.dispatchTouchEvent", {
+            "type": "touchStart",
+            "touchPoints": [{"x": x, "y": y, "radiusX": 2, "radiusY": 2, "force": 1}],
+        })
+        client.send("Input.dispatchTouchEvent", {"type": "touchEnd", "touchPoints": []})
+        print(f"debug cdp touch at {round(x)},{round(y)}", flush=True)
+    except Exception as cdp_error:
+        print(f"cdp touch failed: {cdp_error}", flush=True)
 
 def type_first_visible(page, selectors, value, timeout=8000):
     locator = wait_for_any(page, selectors, timeout=timeout)
@@ -130,48 +144,18 @@ def wait_for_tid_inputs(page, timeout_ms=16000):
     raise TimeoutError(f"T ID inputs not visible. url={last_url}. body={last_body}")
 
 def tap_tid_login_and_show_result(page):
-    password_input = wait_for_any(page, [
+    wait_for_any(page, [
         "input#inputPassword",
         "input#password",
         "input[name='password']",
         "input[name='passwd']",
         "input[type='password']",
     ], timeout=8000)
-    password_box = password_input.bounding_box(timeout=8000)
-    if not password_box:
-        raise TimeoutError("Password input has no bounding box")
 
-    candidates = page.locator("button, input[type='submit'], a[role='button']").all()
-    submit_candidates = []
-    for candidate in candidates:
-        try:
-            if not candidate.is_visible(timeout=500):
-                continue
-            box = candidate.bounding_box(timeout=1000)
-            if not box:
-                continue
-            label = candidate.evaluate("""
-                e => (e.innerText || e.value || e.getAttribute('aria-label') || '').trim()
-            """)
-            kind = candidate.evaluate("e => (e.tagName + ':' + (e.type || '')).toLowerCase()")
-            is_login_label = label in ['Login', '로그인'] or 'login' in label.lower() or '로그인' in label
-            is_submit = 'input:submit' in kind or candidate.evaluate("e => e.getAttribute('type') === 'submit'")
-            is_below_password = box["y"] > password_box["y"] + password_box["height"] - 2
-            is_reasonable_size = box["width"] >= 80 and box["height"] >= 28
-            if is_below_password and is_reasonable_size and (is_login_label or is_submit):
-                submit_candidates.append((box["y"], label, candidate))
-        except Exception as candidate_error:
-            print(f"skip login candidate: {candidate_error}", flush=True)
-
-    if submit_candidates:
-        submit_candidates.sort(key=lambda item: item[0])
-        _, label, login_button = submit_candidates[0]
-        tap_point = physical_tap(login_button, timeout=8000)
-        print(f"debug tapped T ID submit label={label} at {tap_point}", flush=True)
-    else:
-        print("debug no submit button below password, pressing Enter from password input", flush=True)
-        password_input.press("Enter", timeout=8000)
-
+    # The blue T ID login control is drawn as a mobile touch target near this point.
+    # Tap the visible button center directly instead of relying on the element tag.
+    physical_tap_at(page, 195, 470)
+    print("debug tapped lower blue login button by coordinate", flush=True)
     page.wait_for_timeout(5000)
     return screenshot_response(page)
 
