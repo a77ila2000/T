@@ -17,7 +17,7 @@ MY_PAGE_URL = "https://m.sktuniverse.co.kr/my"
 TID_AUTHORIZE_URL = (
     "https://tapi.t-id.co.kr/oidc/v20/authorize"
     "?client_id=a1c144a9-6ab3-49f3-b03f-4ce80d257f16"
-    "&redirect_uri=https%3A%2F%2Fm.sktuniverse.co.kr%2Fmember%2Flogin%2Fchannel%2Ftid"
+    "&redirect_uri=https%3A%2F%2Fm.sktuniverse.co.kr%2Fmember%2Flogin%2Fchannel/tid"
 )
 MOBILE_USER_AGENT = (
     "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) "
