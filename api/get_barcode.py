@@ -93,8 +93,7 @@ def physical_tap_at(page, x, y):
         page.touchscreen.tap(x, y)
         print(f"debug touchscreen tap at {round(x)},{round(y)}", flush=True)
     except Exception as tap_error:
-        print(f"touchscreen tap failed, using mouse click: {tap_error}", flush=True)
-        page.mouse.click(x, y)
+        print(f"touchscreen tap failed: {tap_error}", flush=True)
     try:
         client = page.context.new_cdp_session(page)
         client.send("Input.dispatchTouchEvent", {
@@ -105,6 +104,27 @@ def physical_tap_at(page, x, y):
         print(f"debug cdp touch at {round(x)},{round(y)}", flush=True)
     except Exception as cdp_error:
         print(f"cdp touch failed: {cdp_error}", flush=True)
+    try:
+        page.mouse.click(x, y)
+        print(f"debug mouse click at {round(x)},{round(y)}", flush=True)
+    except Exception as mouse_error:
+        print(f"mouse click failed: {mouse_error}", flush=True)
+
+def dom_click_at(page, x, y):
+    try:
+        result = page.evaluate("""
+            ([x, y]) => {
+                const el = document.elementFromPoint(x, y);
+                if (!el) return 'no element';
+                const clickable = el.closest('button,a,[role="button"],[onclick]') || el;
+                const label = (clickable.innerText || clickable.value || clickable.getAttribute('aria-label') || '').trim();
+                clickable.click();
+                return `${clickable.tagName}#${clickable.id || ''}.${clickable.className || ''} text=${label}`;
+            }
+        """, [x, y])
+        print(f"debug dom click at {round(x)},{round(y)} target={result}", flush=True)
+    except Exception as js_error:
+        print(f"dom click failed: {js_error}", flush=True)
 
 def type_first_visible(page, selectors, value, timeout=8000):
     locator = wait_for_any(page, selectors, timeout=timeout)
@@ -143,6 +163,7 @@ def open_t_id_from_t_universe(main_page):
 
     before_pages = list(main_page.context.pages)
     physical_tap_at(main_page, 195, 400)
+    dom_click_at(main_page, 195, 400)
     main_page.wait_for_timeout(6000)
     after_pages = list(main_page.context.pages)
     new_pages = [p for p in after_pages if p not in before_pages]
@@ -157,6 +178,7 @@ def open_t_id_from_t_universe(main_page):
 
 def finish_tid_login(tid_page, final_page):
     physical_tap_at(tid_page, 195, 470)
+    dom_click_at(tid_page, 195, 470)
     print("debug tapped lower blue T ID login button", flush=True)
     try:
         tid_page.wait_for_url("**/member/login/channel/tid?code=**", timeout=15000)
