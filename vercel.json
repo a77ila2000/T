@@ -3,6 +3,10 @@
     {
       "src": "api/get_barcode.py",
       "use": "@vercel/python"
+    },
+    {
+      "src": "public/**",
+      "use": "@vercel/static"
     }
   ],
   "routes": [
@@ -12,7 +16,7 @@
     },
     {
       "src": "/(.*)",
-      "dest": "/$1"
+      "dest": "public/$1"
     }
   ]
 }
