@@ -35,6 +35,7 @@ def create_error_image(account_id, error):
     img.save(img_byte_arr, format='PNG')
     return Response(img_byte_arr.getvalue(), mimetype='image/png')
 
+# get_barcode.py의 해당 라우터 부분을 아래와 같이 확실히 지정합니다.
 @app.route('/api/get_barcode', methods=['GET'])
 def handler():
     account_id_to_find = request.args.get('id')
