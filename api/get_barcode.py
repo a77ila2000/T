@@ -53,6 +53,9 @@ def assert_time_left(deadline, stage):
     if seconds_left(deadline) < 3:
         raise TimeoutError(f"deadline reached before {stage}")
 
+def build_browserless_url():
+    return f"wss://chrome.browserless.io?token={BROWSERLESS_TOKEN}&stealth=true&timeout=55000"
+
 def build_tid_login_url():
     redirect_uri = quote(TID_REDIRECT_URL, safe='')
     return f"{TID_AUTHORIZE_URL}?client_id={TID_CLIENT_ID}&redirect_uri={redirect_uri}"
@@ -109,7 +112,7 @@ def handler():
         with sync_playwright() as p:
             stage = "connect_browserless"
             browser = p.chromium.connect_over_cdp(
-                f"wss://chrome.browserless.io?token={BROWSERLESS_TOKEN}",
+                build_browserless_url(),
                 timeout=10000,
             )
             page = browser.new_page(
