@@ -130,14 +130,48 @@ def wait_for_tid_inputs(page, timeout_ms=16000):
     raise TimeoutError(f"T ID inputs not visible. url={last_url}. body={last_body}")
 
 def tap_tid_login_and_show_result(page):
-    login_button = wait_for_any(page, [
-        "button[data-click-id='login']",
-        "button.btn-secondary:has-text('Login')",
-        "button:has-text('Login')",
-        "button#loginBtn",
+    password_input = wait_for_any(page, [
+        "input#inputPassword",
+        "input#password",
+        "input[name='password']",
+        "input[name='passwd']",
+        "input[type='password']",
     ], timeout=8000)
-    tap_point = physical_tap(login_button, timeout=8000)
-    print(f"debug tapped T ID submit at {tap_point}", flush=True)
+    password_box = password_input.bounding_box(timeout=8000)
+    if not password_box:
+        raise TimeoutError("Password input has no bounding box")
+
+    candidates = page.locator("button, input[type='submit'], a[role='button']").all()
+    submit_candidates = []
+    for candidate in candidates:
+        try:
+            if not candidate.is_visible(timeout=500):
+                continue
+            box = candidate.bounding_box(timeout=1000)
+            if not box:
+                continue
+            label = candidate.evaluate("""
+                e => (e.innerText || e.value || e.getAttribute('aria-label') || '').trim()
+            """)
+            kind = candidate.evaluate("e => (e.tagName + ':' + (e.type || '')).toLowerCase()")
+            is_login_label = label in ['Login', '로그인'] or 'login' in label.lower() or '로그인' in label
+            is_submit = 'input:submit' in kind or candidate.evaluate("e => e.getAttribute('type') === 'submit'")
+            is_below_password = box["y"] > password_box["y"] + password_box["height"] - 2
+            is_reasonable_size = box["width"] >= 80 and box["height"] >= 28
+            if is_below_password and is_reasonable_size and (is_login_label or is_submit):
+                submit_candidates.append((box["y"], label, candidate))
+        except Exception as candidate_error:
+            print(f"skip login candidate: {candidate_error}", flush=True)
+
+    if submit_candidates:
+        submit_candidates.sort(key=lambda item: item[0])
+        _, label, login_button = submit_candidates[0]
+        tap_point = physical_tap(login_button, timeout=8000)
+        print(f"debug tapped T ID submit label={label} at {tap_point}", flush=True)
+    else:
+        print("debug no submit button below password, pressing Enter from password input", flush=True)
+        password_input.press("Enter", timeout=8000)
+
     page.wait_for_timeout(5000)
     return screenshot_response(page)
 
