@@ -3,7 +3,7 @@ import os
 import json
 import base64
 from cryptography.fernet import Fernet
-from playwright.sync_api import sync_playwright, TimeoutError
+from playwright.sync_api import sync_playwright
 import io
 import time
 
@@ -25,31 +25,28 @@ def decrypt_accounts():
     f = Fernet(key)
     return json.loads(f.decrypt(encrypted_accounts).decode("utf-8"))
 
-def create_error_image(account_id, error):
+def create_text_image(lines, width=1150):
     from PIL import Image, ImageDraw
-    img = Image.new("RGB", (760, 300), color=(255, 235, 238))
+    wrapped = []
+    for line in lines:
+        text = str(line).replace("\n", " | ")
+        while len(text) > 125:
+            wrapped.append(text[:125])
+            text = text[125:]
+        wrapped.append(text)
+    height = max(320, 28 + len(wrapped) * 18)
+    img = Image.new("RGB", (width, height), color=(245, 247, 250))
     d = ImageDraw.Draw(img)
-    text = str(error).replace("\n", " ")[:430]
-    lines = [text[i:i + 76] for i in range(0, len(text), 76)]
-    d.multiline_text((18, 34), "\n".join(["Barcode failed", f"ID: {account_id}"] + lines[:5]), fill=(211, 47, 47))
+    y = 14
+    for line in wrapped:
+        d.text((16, y), line, fill=(24, 31, 42))
+        y += 18
     out = io.BytesIO()
     img.save(out, format="PNG")
     return Response(out.getvalue(), mimetype="image/png")
 
-def screenshot_response(page):
-    try:
-        client = page.context.new_cdp_session(page)
-        data = client.send("Page.captureScreenshot", {"format": "png", "fromSurface": True})
-        return Response(base64.b64decode(data["data"]), mimetype="image/png")
-    except Exception as screenshot_error:
-        return create_error_image("debug", f"debug screenshot failed: {screenshot_error}. url={safe_url(page)} body={get_body_text(page, 220)}")
-
-def seconds_left(deadline):
-    return max(0.5, deadline - time.monotonic())
-
-def assert_time_left(deadline, stage):
-    if seconds_left(deadline) < 3:
-        raise TimeoutError(f"deadline reached before {stage}")
+def create_error_image(account_id, error):
+    return create_text_image(["Barcode failed", f"ID: {account_id}", str(error)], width=900)
 
 def build_browserless_url():
     return f"wss://chrome.browserless.io?token={BROWSERLESS_TOKEN}&stealth=true&timeout=55000"
@@ -60,33 +57,11 @@ def safe_url(page):
     except Exception:
         return "closed"
 
-def get_body_text(page, limit=180):
+def get_body_text(page, limit=260):
     try:
         return page.locator("body").inner_text(timeout=1000).replace("\n", " | ")[:limit]
     except Exception:
         return ""
-
-def wait_for_any(page, selectors, timeout=8000):
-    joined = ", ".join(selectors)
-    locator = page.locator(joined).first
-    locator.wait_for(state="visible", timeout=timeout)
-    return locator
-
-def physical_tap(locator, timeout=8000):
-    locator.wait_for(state="visible", timeout=timeout)
-    try:
-        locator.scroll_into_view_if_needed(timeout=timeout)
-    except Exception:
-        pass
-    box = locator.bounding_box(timeout=timeout)
-    if not box:
-        raise TimeoutError("Element has no bounding box")
-    page = locator.page
-    x = box["x"] + box["width"] / 2
-    y = box["y"] + box["height"] / 2
-    physical_tap_at(page, x, y)
-    page.wait_for_timeout(700)
-    return f"{round(x)},{round(y)}"
 
 def physical_tap_at(page, x, y):
     try:
@@ -112,150 +87,116 @@ def physical_tap_at(page, x, y):
 
 def dom_click_at(page, x, y):
     try:
-        result = page.evaluate("""
+        return page.evaluate("""
             ([x, y]) => {
                 const el = document.elementFromPoint(x, y);
                 if (!el) return 'no element';
                 const clickable = el.closest('button,a,[role="button"],[onclick]') || el;
+                const before = location.href;
                 const label = (clickable.innerText || clickable.value || clickable.getAttribute('aria-label') || '').trim();
                 clickable.click();
-                return `${clickable.tagName}#${clickable.id || ''}.${clickable.className || ''} text=${label}`;
+                return `${clickable.tagName}#${clickable.id || ''}.${String(clickable.className || '').slice(0, 80)} text=${label} href=${clickable.href || ''} before=${before} after=${location.href}`;
             }
         """, [x, y])
-        print(f"debug dom click at {round(x)},{round(y)} target={result}", flush=True)
     except Exception as js_error:
-        print(f"dom click failed: {js_error}", flush=True)
+        return f"dom click failed: {js_error}"
 
-def type_first_visible(page, selectors, value, timeout=8000):
-    locator = wait_for_any(page, selectors, timeout=timeout)
+def element_at(page, x, y):
     try:
-        physical_tap(locator, timeout=timeout)
-        locator.fill("", timeout=timeout)
-        locator.type(value, delay=45, timeout=timeout)
-        return locator.evaluate("e => e.id || e.name || e.type || e.tagName")
+        return page.evaluate("""
+            ([x, y]) => {
+                const chain = [];
+                let el = document.elementFromPoint(x, y);
+                while (el && chain.length < 6) {
+                    const r = el.getBoundingClientRect();
+                    chain.push(`${el.tagName}#${el.id || ''}.${String(el.className || '').slice(0,80)} role=${el.getAttribute('role') || ''} href=${el.href || ''} rect=${Math.round(r.x)},${Math.round(r.y)},${Math.round(r.width)},${Math.round(r.height)} text=${String(el.innerText || el.value || '').trim().slice(0,90)}`);
+                    el = el.parentElement;
+                }
+                return chain;
+            }
+        """, [x, y])
     except Exception as e:
-        body_text = get_body_text(page, 160)
-        raise TimeoutError(f"Could not type into input. url={safe_url(page)} body={body_text}. selectors={selectors}. err={e}")
-
-def wait_for_tid_inputs(page, timeout_ms=16000):
-    end_time = time.monotonic() + (timeout_ms / 1000)
-    last_url = ""
-    last_body = ""
-    while time.monotonic() < end_time:
-        last_url = safe_url(page)
-        try:
-            if page.locator("input#inputId, input#userId, input[type='text']").first.is_visible(timeout=1000):
-                return
-        except Exception:
-            pass
-        last_body = get_body_text(page, 160)
-        time.sleep(0.5)
-    raise TimeoutError(f"T ID inputs not visible. url={last_url}. body={last_body}")
-
-def open_t_id_from_t_universe(main_page):
-    main_page.goto(MY_PAGE_URL, wait_until="domcontentloaded", timeout=25000)
-    main_page.wait_for_timeout(5000)
-    print(f"debug my page before login: {safe_url(main_page)} body={get_body_text(main_page, 180)}", flush=True)
-
-    physical_tap_at(main_page, 112, 96)
-    main_page.wait_for_timeout(5000)
-    print(f"debug login entry: {safe_url(main_page)} body={get_body_text(main_page, 220)}", flush=True)
-
-    before_pages = list(main_page.context.pages)
-    physical_tap_at(main_page, 195, 400)
-    dom_click_at(main_page, 195, 400)
-    main_page.wait_for_timeout(6000)
-    after_pages = list(main_page.context.pages)
-    new_pages = [p for p in after_pages if p not in before_pages]
-    tid_page = new_pages[-1] if new_pages else main_page
-    tid_page.set_default_timeout(8000)
-    try:
-        tid_page.wait_for_load_state("domcontentloaded", timeout=10000)
-    except Exception as load_error:
-        print(f"T ID page load wait failed: {load_error}", flush=True)
-    print(f"debug T ID page chosen: pages_before={len(before_pages)} pages_after={len(after_pages)} url={safe_url(tid_page)} body={get_body_text(tid_page, 220)}", flush=True)
-    return tid_page
-
-def finish_tid_login(tid_page, final_page):
-    physical_tap_at(tid_page, 195, 470)
-    dom_click_at(tid_page, 195, 470)
-    print("debug tapped lower blue T ID login button", flush=True)
-    try:
-        tid_page.wait_for_url("**/member/login/channel/tid?code=**", timeout=15000)
-        print(f"debug reached T Universe callback: {safe_url(tid_page)}", flush=True)
-    except Exception as callback_error:
-        print(f"callback wait failed: {callback_error}. current={safe_url(tid_page)}", flush=True)
-    try:
-        tid_page.wait_for_load_state("domcontentloaded", timeout=10000)
-    except Exception as load_error:
-        print(f"callback domcontentloaded wait failed: {load_error}", flush=True)
-    tid_page.wait_for_timeout(9000)
-    final_page.goto(MY_PAGE_URL, wait_until="domcontentloaded", timeout=25000)
-    final_page.wait_for_timeout(8000)
+        return [f"element_at failed: {e}"]
 
 @app.route("/api/get_barcode", methods=["GET"])
 def handler():
     account_id = request.args.get("id")
     if not account_id:
         return "Account ID is required.", 400
-
     browser = None
     stage = "start"
-    deadline = time.monotonic() + 58
-
+    events = []
     try:
         stage = "decrypt_accounts"
         accounts = decrypt_accounts()
-        target_account = next((acc for acc in accounts if acc["id"] == account_id), None)
-        if not target_account:
+        if not next((acc for acc in accounts if acc["id"] == account_id), None):
             return f"Account not found: {account_id}", 404
 
         with sync_playwright() as p:
             stage = "connect_browserless"
             browser = p.chromium.connect_over_cdp(build_browserless_url(), timeout=10000)
-            main_page = browser.new_page(
-                viewport={"width": 390, "height": 844},
-                user_agent=MOBILE_USER_AGENT,
-                is_mobile=True,
-                has_touch=True,
-            )
-            main_page.set_default_timeout(8000)
+            page = browser.new_page(viewport={"width": 390, "height": 844}, user_agent=MOBILE_USER_AGENT, is_mobile=True, has_touch=True)
+            page.set_default_timeout(8000)
+            page.on("request", lambda req: events.append(f"REQ {req.method} {req.url[:210]}"))
+            page.on("response", lambda res: events.append(f"RES {res.status} {res.url[:210]}"))
+            page.on("requestfailed", lambda req: events.append(f"FAIL {req.failure or ''} {req.url[:210]}"))
+            page.context.on("page", lambda new_page: events.append(f"NEW_PAGE {safe_url(new_page)}"))
 
-            stage = "open_t_id_from_t_universe"
-            tid_page = open_t_id_from_t_universe(main_page)
-            wait_for_tid_inputs(tid_page, timeout_ms=min(16000, int(seconds_left(deadline) * 1000)))
-            assert_time_left(deadline, stage)
+            stage = "open_my"
+            page.goto(MY_PAGE_URL, wait_until="domcontentloaded", timeout=25000)
+            page.wait_for_timeout(5000)
+            url_before_login = safe_url(page)
+            body_before_login = get_body_text(page)
 
-            stage = "type_tid_credentials"
-            print(f"stage={stage} url={safe_url(tid_page)}", flush=True)
-            user_selector = type_first_visible(tid_page, [
-                "input#inputId",
-                "input#userId",
-                "input[name='userId']",
-                "input[name='id']",
-                "input[type='email']",
-                "input[type='text']",
-            ], target_account["id"], timeout=8000)
-            print(f"typed user selector: {user_selector}", flush=True)
-            password_selector = type_first_visible(tid_page, [
-                "input#inputPassword",
-                "input#password",
-                "input[name='password']",
-                "input[name='passwd']",
-                "input[type='password']",
-            ], target_account["password"], timeout=8000)
-            print(f"typed password selector: {password_selector}", flush=True)
-            assert_time_left(deadline, stage)
+            stage = "tap_login_join"
+            physical_tap_at(page, 112, 96)
+            page.wait_for_timeout(5000)
+            url_before_t = safe_url(page)
+            body_before_t = get_body_text(page)
+            before_pages = len(page.context.pages)
+            before_events_count = len(events)
+            point_chain = element_at(page, 195, 400)
 
-            stage = "finish_tid_login"
-            finish_tid_login(tid_page, main_page)
-            print(f"debug final my page: {safe_url(main_page)} body={get_body_text(main_page, 220)}", flush=True)
-            return screenshot_response(main_page)
+            stage = "tap_t_provider"
+            physical_tap_at(page, 195, 400)
+            dom_click_result = dom_click_at(page, 195, 400)
+            page.wait_for_timeout(9000)
+            after_pages = len(page.context.pages)
+            url_after_t = safe_url(page)
+            body_after_t = get_body_text(page)
+            network_after_t = events[before_events_count:]
+
+            lines = [
+                "T PROVIDER TAP NETWORK DIAGNOSTIC",
+                f"stage: {stage}",
+                f"url_before_login: {url_before_login}",
+                f"body_before_login: {body_before_login}",
+                f"url_before_t: {url_before_t}",
+                f"body_before_t: {body_before_t}",
+                f"pages_before_t: {before_pages}",
+                f"pages_after_t: {after_pages}",
+                f"url_after_t: {url_after_t}",
+                f"body_after_t: {body_after_t}",
+                f"dom_click_result: {dom_click_result}",
+                "",
+                "elementFromPoint chain at 195,400 before tap:",
+            ]
+            lines.extend([f"- {item}" for item in point_chain])
+            lines.append("")
+            lines.append(f"network events after T tap: count={len(network_after_t)}")
+            if network_after_t:
+                lines.extend([f"- {event}" for event in network_after_t[-60:]])
+            else:
+                lines.append("- none")
+            lines.append("")
+            lines.append("all pages:")
+            for idx, p2 in enumerate(page.context.pages):
+                lines.append(f"- page[{idx}] {safe_url(p2)} body={get_body_text(p2, 120)}")
+            return create_text_image(lines)
 
     except Exception as e:
         print(f"Error processing {account_id} at {stage}: {type(e).__name__}: {e}", flush=True)
         return create_error_image(account_id, f"{stage}: {type(e).__name__}: {e}")
-
     finally:
         if browser:
             try:
