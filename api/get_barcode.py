@@ -44,7 +44,10 @@ def create_error_image(account_id, error):
     return Response(img_byte_arr.getvalue(), mimetype="image/png")
 
 def screenshot_response(page):
-    return Response(page.screenshot(type="png", full_page=True), mimetype="image/png")
+    return Response(
+        page.screenshot(type="png", full_page=False, timeout=5000),
+        mimetype="image/png",
+    )
 
 def seconds_left(deadline):
     return max(0.5, deadline - time.monotonic())
