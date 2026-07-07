@@ -41,7 +41,6 @@
             const cardContainer = document.getElementById('card-container');
             const BARCODE_VALID_TIME = 20 * 60;
             const INITIAL_STAGGER_MS = 10 * 60 * 1000;
-            const RENEW_BEFORE_SECONDS = 2 * 60;
             const refreshQueue = [];
             const queuedIds = new Set();
             let queueRunning = false;
@@ -193,17 +192,14 @@
                     const seconds = timeLeft % 60;
                     timerEl.textContent = `남은 시간: ${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
 
-                    if (timeLeft <= RENEW_BEFORE_SECONDS && img.dataset.refreshQueued !== '1') {
-                        img.dataset.refreshQueued = '1';
-                        statusEl.textContent = '만료 전 자동 갱신 대기 중입니다.';
-                        enqueueBarcode(accountId, { auto: true, preserveDisplay: true });
-                    }
-
                     if (--timeLeft < 0) {
                         clearInterval(timerId);
                         delete img.dataset.timerId;
-                        statusEl.textContent = '바코드가 만료되었습니다. 자동 갱신 중...';
-                        enqueueBarcode(accountId, { auto: true, preserveDisplay: true });
+                        if (img.dataset.refreshQueued !== '1') {
+                            img.dataset.refreshQueued = '1';
+                            statusEl.textContent = '20분이 지나 자동 갱신 중입니다.';
+                            enqueueBarcode(accountId, { auto: true, preserveDisplay: true });
+                        }
                     }
                 };
 
