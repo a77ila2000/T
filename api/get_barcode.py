@@ -20,9 +20,9 @@ TID_AUTHORIZE_URL = (
     "&redirect_uri=https%3A%2F%2Fm.sktuniverse.co.kr%2Fmember%2Flogin%2Fchannel/tid"
 )
 MOBILE_USER_AGENT = (
-    "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) "
-    "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 "
-    "Mobile/15E148 Safari/604.1"
+    "Mozilla/5.0 (Linux; Android 13; SM-G981B) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/149.0.0.0 Mobile Safari/537.36"
 )
 
 def decrypt_accounts():
@@ -80,19 +80,9 @@ def wait_for_any(page, selectors, timeout=6000):
     locator.wait_for(state="visible", timeout=timeout)
     return locator
 
-def wait_for_text_contains(page, expected, timeout_ms=7000):
-    end = time.monotonic() + timeout_ms / 1000
-    last_body = ""
-    while time.monotonic() < end:
-        last_body = get_body_text(page, 400)
-        if expected in last_body:
-            return
-        time.sleep(0.2)
-    raise TimeoutError(f"text not visible: {expected}. url={safe_url(page)} body={last_body}")
-
 def new_mobile_context(browser):
     return browser.new_context(
-        viewport={"width": 390, "height": 844},
+        viewport={"width": 412, "height": 915},
         user_agent=MOBILE_USER_AGENT,
         is_mobile=True,
         has_touch=True,
@@ -147,7 +137,7 @@ def wait_for_tid_login_form(page, timeout_ms=8000):
         time.sleep(0.2)
     raise TimeoutError(f"T ID login form not visible. url={last_url}. body={last_body}")
 
-def wait_for_tid_result(tid_page, timeout_ms=3200):
+def wait_for_tid_result(tid_page, timeout_ms=5200):
     end = time.monotonic() + timeout_ms / 1000
     last_url = ""
     while time.monotonic() < end:
@@ -155,22 +145,21 @@ def wait_for_tid_result(tid_page, timeout_ms=3200):
             print("debug T ID page closed after submit", flush=True)
             return "closed"
         last_url = safe_url(tid_page)
-        if "/member/login/channel/tid" in last_url or "code=" in last_url:
+        if "/member/login/channel/tid" in last_url or "code=" in last_url or "/my" in last_url:
             print(f"debug T ID callback reached: {last_url}", flush=True)
-            tid_page.wait_for_timeout(300)
+            tid_page.wait_for_timeout(700)
             return "callback"
         time.sleep(0.2)
     print(f"debug T ID result wait timed out at url={last_url} body={get_body_text(tid_page, 200)}", flush=True)
     return "timeout"
 
 def open_authorize_fallback(main_page, chooser_url):
-    print("debug opening authorize fallback in same context", flush=True)
-    tid_page = main_page.context.new_page()
-    tid_page.set_default_timeout(6000)
-    goto_mobile_page(tid_page, TID_AUTHORIZE_URL, timeout=12000, referer=chooser_url)
-    tid_page.wait_for_timeout(300)
-    print(f"debug fallback tid url={safe_url(tid_page)} body={get_body_text(tid_page, 180)}", flush=True)
-    return tid_page
+    print("debug opening authorize fallback in the same tab", flush=True)
+    main_page.set_default_timeout(6000)
+    goto_mobile_page(main_page, TID_AUTHORIZE_URL, timeout=12000, referer=chooser_url)
+    main_page.wait_for_timeout(300)
+    print(f"debug fallback tid url={safe_url(main_page)} body={get_body_text(main_page, 180)}", flush=True)
+    return main_page
 
 def open_tid_from_my(main_page):
     goto_mobile_page(main_page, MY_PAGE_URL, timeout=12000)
@@ -273,18 +262,19 @@ def handler():
                 print(f"login button locator failed, coordinate tap: {button_error}", flush=True)
                 physical_tap_at(tid_page, 195, 330)
                 physical_tap_at(tid_page, 195, 470)
-            result = wait_for_tid_result(tid_page, timeout_ms=3200)
+            result = wait_for_tid_result(tid_page, timeout_ms=5200)
             print(f"debug tid submit result={result} url={safe_url(tid_page)}", flush=True)
 
             stage = "open_my_after_login"
             mark(stage)
-            if main_page.is_closed():
-                main_page = context.new_page()
-                main_page.set_default_timeout(6000)
-            goto_mobile_page(main_page, MY_PAGE_URL, timeout=11000)
-            main_page.wait_for_timeout(800)
-            print(f"debug final my url={safe_url(main_page)} body={get_body_text(main_page, 260)}", flush=True)
-            return screenshot_response(main_page)
+            final_page = tid_page if not tid_page.is_closed() else main_page
+            if final_page.is_closed():
+                final_page = context.new_page()
+                final_page.set_default_timeout(6000)
+            goto_mobile_page(final_page, MY_PAGE_URL, timeout=11000)
+            final_page.wait_for_timeout(1200)
+            print(f"debug final my url={safe_url(final_page)} body={get_body_text(final_page, 260)}", flush=True)
+            return screenshot_response(final_page)
 
     except Exception as e:
         print(f"Error processing {account_id} at {stage}: {type(e).__name__}: {e}", flush=True)
