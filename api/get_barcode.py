@@ -63,6 +63,18 @@ def get_body_text(page, limit=260):
     except Exception:
         return ""
 
+def wait_for_text(page, text, timeout_ms=20000):
+    end = time.monotonic() + timeout_ms / 1000
+    last_url = ""
+    last_body = ""
+    while time.monotonic() < end:
+        last_url = safe_url(page)
+        last_body = get_body_text(page, 500)
+        if text in last_body:
+            return True
+        time.sleep(0.5)
+    raise TimeoutError(f"text not visible: {text}. url={last_url}. body={last_body}")
+
 def physical_tap_at(page, x, y):
     try:
         page.touchscreen.tap(x, y)
@@ -150,13 +162,14 @@ def handler():
 
             stage = "tap_login_join"
             physical_tap_at(page, 112, 96)
-            page.wait_for_timeout(5000)
+            wait_for_text(page, "T아이디", timeout_ms=25000)
+            page.wait_for_timeout(1500)
             url_before_t = safe_url(page)
             body_before_t = get_body_text(page)
             before_pages = len(page.context.pages)
-            before_events_count = len(events)
             point_chain = element_at(page, 195, 400)
 
+            events.clear()
             stage = "tap_t_provider"
             physical_tap_at(page, 195, 400)
             dom_click_result = dom_click_at(page, 195, 400)
@@ -164,10 +177,10 @@ def handler():
             after_pages = len(page.context.pages)
             url_after_t = safe_url(page)
             body_after_t = get_body_text(page)
-            network_after_t = events[before_events_count:]
+            network_after_t = list(events)
 
             lines = [
-                "T PROVIDER TAP NETWORK DIAGNOSTIC",
+                "T PROVIDER TAP NETWORK DIAGNOSTIC - WAITED FOR BUTTON",
                 f"stage: {stage}",
                 f"url_before_login: {url_before_login}",
                 f"body_before_login: {body_before_login}",
@@ -183,9 +196,9 @@ def handler():
             ]
             lines.extend([f"- {item}" for item in point_chain])
             lines.append("")
-            lines.append(f"network events after T tap: count={len(network_after_t)}")
+            lines.append(f"network events after T tap only: count={len(network_after_t)}")
             if network_after_t:
-                lines.extend([f"- {event}" for event in network_after_t[-60:]])
+                lines.extend([f"- {event}" for event in network_after_t[-80:]])
             else:
                 lines.append("- none")
             lines.append("")
