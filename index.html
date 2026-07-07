@@ -26,8 +26,6 @@
 
     <script>
         document.addEventListener('DOMContentLoaded', () => {
-            // API에서 계정 정보를 가져와서 UI를 동적으로 생성할 수 있습니다.
-            // 여기서는 간단하게 프론트엔드에 계정 목록을 정의합니다.
             const accounts = [
                 { user: "나", id: "a77ila2000" },
                 { user: "어머니", id: "a77ila10004" },
@@ -35,7 +33,7 @@
             ];
 
             const cardContainer = document.getElementById('card-container');
-            const BARCODE_VALID_TIME = 20 * 60; // 20분
+            const BARCODE_VALID_TIME = 20 * 60;
 
             accounts.forEach(account => {
                 const card = document.createElement('div');
@@ -62,7 +60,7 @@
                 button.addEventListener('click', () => fetchBarcode(account.id));
             });
 
-            function fetchBarcode(accountId) {
+            async function fetchBarcode(accountId) {
                 const card = document.getElementById(`card-${accountId}`);
                 const img = card.querySelector(`img[data-id="${accountId}"]`);
                 const loader = card.querySelector('.loader');
@@ -70,34 +68,46 @@
                 const timerEl = card.querySelector('.timer');
                 const statusEl = card.querySelector('.status');
 
-                // 기존 타이머 중지
                 if (img.dataset.timerId) {
                     clearInterval(parseInt(img.dataset.timerId));
                 }
+                if (img.dataset.objectUrl) {
+                    URL.revokeObjectURL(img.dataset.objectUrl);
+                    delete img.dataset.objectUrl;
+                }
 
-                // UI 초기화 및 로더 표시
                 img.classList.add('hidden');
                 placeholder.classList.add('hidden');
                 loader.classList.remove('hidden');
                 statusEl.textContent = '바코드를 실시간으로 생성 중입니다...';
                 timerEl.textContent = '';
 
-                // 캐시 방지를 위해 timestamp 추가
-                img.src = `/api/get_barcode?id=${accountId}&t=${new Date().getTime()}`;
+                try {
+                    const response = await fetch(`/api/get_barcode?id=${accountId}&t=${Date.now()}`, { cache: 'no-store' });
+                    if (!response.ok) {
+                        throw new Error(`HTTP ${response.status}`);
+                    }
+                    const blob = await response.blob();
+                    if (!blob.type.startsWith('image/')) {
+                        throw new Error('이미지 응답이 아닙니다');
+                    }
+                    const objectUrl = URL.createObjectURL(blob);
+                    const secondsLeft = parseInt(response.headers.get('X-Barcode-Seconds-Left') || '', 10) || BARCODE_VALID_TIME;
+                    const barcodeNumber = response.headers.get('X-Barcode-Number') || '';
 
-                img.onload = () => {
-                    loader.classList.add('hidden');
+                    img.dataset.objectUrl = objectUrl;
+                    img.src = objectUrl;
                     img.classList.remove('hidden');
-                    statusEl.textContent = '바코드가 생성되었습니다.';
-                    startTimer(accountId, BARCODE_VALID_TIME);
-                };
-
-                img.onerror = () => {
                     loader.classList.add('hidden');
-                    statusEl.textContent = '오류가 발생했습니다. 다시 시도해주세요.';
-                    // 에러 이미지는 API에서 반환하므로, 그냥 보여주기만 하면 됩니다.
-                    img.classList.remove('hidden'); 
-                };
+                    statusEl.textContent = barcodeNumber ? `바코드가 생성되었습니다. (${barcodeNumber})` : '바코드가 생성되었습니다.';
+                    startTimer(accountId, secondsLeft);
+                } catch (error) {
+                    loader.classList.add('hidden');
+                    img.classList.add('hidden');
+                    placeholder.classList.remove('hidden');
+                    placeholder.textContent = '오류가 발생했습니다. 다시 시도해주세요.';
+                    statusEl.textContent = String(error.message || error);
+                }
             }
 
             function startTimer(accountId, duration) {
@@ -106,7 +116,7 @@
                 const timerEl = card.querySelector('.timer');
                 const statusEl = card.querySelector('.status');
 
-                let timeLeft = duration;
+                let timeLeft = Math.max(1, duration);
 
                 const updateTimer = () => {
                     const minutes = Math.floor(timeLeft / 60);
@@ -116,7 +126,7 @@
                     if (--timeLeft < 0) {
                         clearInterval(timerId);
                         statusEl.textContent = '바코드가 만료되었습니다. 자동 갱신 중...';
-                        fetchBarcode(accountId); // 자동 갱신
+                        fetchBarcode(accountId);
                     }
                 };
 
