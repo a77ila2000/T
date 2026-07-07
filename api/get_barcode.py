@@ -14,6 +14,11 @@ ENCRYPTED_ACCOUNTS_B64 = os.environ.get("ENCRYPTED_ACCOUNTS")
 BROWSERLESS_TOKEN = os.environ.get("BROWSERLESS_TOKEN", "2Uq9iBy84O6QGwO008597820ed94cb8fb02789f1092d91545")
 
 MY_PAGE_URL = "https://m.sktuniverse.co.kr/my"
+TID_AUTHORIZE_URL = (
+    "https://tapi.t-id.co.kr/oidc/v20/authorize"
+    "?client_id=a1c144a9-6ab3-49f3-b03f-4ce80d257f16"
+    "&redirect_uri=https%3A%2F%2Fm.sktuniverse.co.kr%2Fmember%2Flogin%2Fchannel%2Ftid"
+)
 MOBILE_USER_AGENT = (
     "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) "
     "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 "
@@ -164,7 +169,8 @@ def open_tid_from_my(main_page):
 
     wait_for_text_contains(main_page, "T아이디", timeout_ms=12000)
     main_page.wait_for_timeout(800)
-    print(f"debug login chooser url={safe_url(main_page)} body={get_body_text(main_page, 220)}", flush=True)
+    chooser_url = safe_url(main_page)
+    print(f"debug login chooser url={chooser_url} body={get_body_text(main_page, 220)}", flush=True)
 
     before_pages = list(main_page.context.pages)
     tid_button = main_page.locator("#link-to-tid-login").first
@@ -175,6 +181,14 @@ def open_tid_from_my(main_page):
     tid_page = new_pages[-1] if new_pages else main_page
     tid_page.set_default_timeout(8000)
     print(f"debug after T button pages_before={len(before_pages)} pages_after={len(after_pages)} tid_url={safe_url(tid_page)} body={get_body_text(tid_page, 180)}", flush=True)
+
+    if "auth.skt-id.co.kr" not in safe_url(tid_page) and "tapi.t-id.co.kr" not in safe_url(tid_page):
+        print("debug T button did not navigate in Browserless, opening authorize fallback in same context", flush=True)
+        tid_page = main_page.context.new_page()
+        tid_page.set_default_timeout(8000)
+        tid_page.goto(TID_AUTHORIZE_URL, wait_until="domcontentloaded", timeout=16000, referer=chooser_url)
+        tid_page.wait_for_timeout(700)
+        print(f"debug fallback tid url={safe_url(tid_page)} body={get_body_text(tid_page, 180)}", flush=True)
     return tid_page
 
 @app.route("/api/get_barcode", methods=["GET"])
