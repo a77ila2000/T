@@ -23,7 +23,7 @@ def decrypt_accounts():
 def create_error_image(account_id, error):
     """오류 발생 시 보여줄 이미지 생성"""
     from PIL import Image, ImageDraw
-    img = Image.new('PNG', (320, 180), color=(255, 235, 238))
+    img = Image.new('RGB', (320, 180), color=(255, 235, 238))
     d = ImageDraw.Draw(img)
     error_message = f"바코드 생성 실패\nID: {account_id}"
     if isinstance(error, TimeoutError):
