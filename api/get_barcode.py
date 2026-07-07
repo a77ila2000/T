@@ -52,20 +52,6 @@ def screenshot_response(page):
     except Exception as screenshot_error:
         return create_error_image("debug", f"debug screenshot failed: {screenshot_error}. url={safe_url(page)} body={get_body_text(page, 220)}")
 
-def seconds_left(deadline):
-    return max(0.5, deadline - time.monotonic())
-
-def assert_time_left(deadline, stage):
-    if seconds_left(deadline) < 3:
-        raise TimeoutError(f"deadline reached before {stage}")
-
-def build_browserless_url():
-    return f"wss://chrome.browserless.io?token={BROWSERLESS_TOKEN}&stealth=true&timeout=55000"
-
-def build_tid_login_url():
-    redirect_uri = quote(TID_REDIRECT_URL, safe="")
-    return f"{TID_AUTHORIZE_URL}?client_id={TID_CLIENT_ID}&redirect_uri={redirect_uri}"
-
 def safe_url(page):
     try:
         return page.url
@@ -78,27 +64,8 @@ def get_body_text(page, limit=180):
     except Exception:
         return ""
 
-def wait_for_any(page, selectors, timeout=8000):
-    joined = ", ".join(selectors)
-    locator = page.locator(joined).first
-    locator.wait_for(state="visible", timeout=timeout)
-    return locator
-
-def physical_tap(locator, timeout=8000):
-    locator.wait_for(state="visible", timeout=timeout)
-    try:
-        locator.scroll_into_view_if_needed(timeout=timeout)
-    except Exception:
-        pass
-    box = locator.bounding_box(timeout=timeout)
-    if not box:
-        raise TimeoutError("Element has no bounding box")
-    page = locator.page
-    x = box["x"] + box["width"] / 2
-    y = box["y"] + box["height"] / 2
-    physical_tap_at(page, x, y)
-    page.wait_for_timeout(700)
-    return f"{round(x)},{round(y)}"
+def build_browserless_url():
+    return f"wss://chrome.browserless.io?token={BROWSERLESS_TOKEN}&stealth=true&timeout=55000"
 
 def physical_tap_at(page, x, y):
     try:
@@ -118,61 +85,6 @@ def physical_tap_at(page, x, y):
     except Exception as cdp_error:
         print(f"cdp touch failed: {cdp_error}", flush=True)
 
-def type_first_visible(page, selectors, value, timeout=8000):
-    locator = wait_for_any(page, selectors, timeout=timeout)
-    try:
-        physical_tap(locator, timeout=timeout)
-        locator.fill("", timeout=timeout)
-        locator.type(value, delay=45, timeout=timeout)
-        return locator.evaluate("e => e.id || e.name || e.type || e.tagName")
-    except Exception as e:
-        body_text = get_body_text(page, 160)
-        raise TimeoutError(f"Could not type into input. url={safe_url(page)} body={body_text}. selectors={selectors}. err={e}")
-
-def wait_for_tid_inputs(page, timeout_ms=16000):
-    end_time = time.monotonic() + (timeout_ms / 1000)
-    last_url = ""
-    last_body = ""
-    while time.monotonic() < end_time:
-        last_url = safe_url(page)
-        try:
-            if page.locator("input#inputId, input#userId, input[type='text']").first.is_visible(timeout=1000):
-                return
-        except Exception:
-            pass
-        last_body = get_body_text(page, 160)
-        time.sleep(0.5)
-    raise TimeoutError(f"T ID inputs not visible. url={last_url}. body={last_body}")
-
-def tap_tid_login_then_open_my_page(page):
-    wait_for_any(page, [
-        "input#inputPassword",
-        "input#password",
-        "input[name='password']",
-        "input[name='passwd']",
-        "input[type='password']",
-    ], timeout=8000)
-
-    physical_tap_at(page, 195, 470)
-    print("debug tapped lower blue login button by coordinate", flush=True)
-
-    try:
-        page.wait_for_url("**/member/login/channel/tid?code=**", timeout=15000)
-        print(f"debug reached T Universe callback: {safe_url(page)}", flush=True)
-    except Exception as callback_error:
-        print(f"callback wait failed: {callback_error}. current={safe_url(page)}", flush=True)
-
-    try:
-        page.wait_for_load_state("domcontentloaded", timeout=10000)
-    except Exception as load_error:
-        print(f"callback domcontentloaded wait failed: {load_error}", flush=True)
-    page.wait_for_timeout(6000)
-
-    print(f"debug opening my page after callback. current={safe_url(page)}", flush=True)
-    page.goto(MY_PAGE_URL, wait_until="domcontentloaded", timeout=25000)
-    page.wait_for_timeout(7000)
-    return screenshot_response(page)
-
 @app.route("/api/get_barcode", methods=["GET"])
 def handler():
     account_id_to_find = request.args.get("id")
@@ -181,8 +93,6 @@ def handler():
 
     browser = None
     stage = "start"
-    deadline = time.monotonic() + 52
-
     try:
         stage = "decrypt_accounts"
         accounts = decrypt_accounts()
@@ -201,37 +111,17 @@ def handler():
             )
             page.set_default_timeout(8000)
 
-            stage = "open_direct_mobile_tid_login"
+            stage = "open_my_page"
             print(f"stage={stage}", flush=True)
-            page.goto(build_tid_login_url(), wait_until="domcontentloaded", timeout=25000)
-            page.wait_for_timeout(2500)
-            wait_for_tid_inputs(page, timeout_ms=min(16000, int(seconds_left(deadline) * 1000)))
-            assert_time_left(deadline, stage)
+            page.goto(MY_PAGE_URL, wait_until="domcontentloaded", timeout=25000)
+            page.wait_for_timeout(5000)
 
-            stage = "type_tid_credentials"
-            print(f"stage={stage} url={safe_url(page)}", flush=True)
-            user_selector = type_first_visible(page, [
-                "input#inputId",
-                "input#userId",
-                "input[name='userId']",
-                "input[name='id']",
-                "input[type='email']",
-                "input[type='text']",
-            ], target_account["id"], timeout=8000)
-            print(f"typed user selector: {user_selector}", flush=True)
-            password_selector = type_first_visible(page, [
-                "input#inputPassword",
-                "input#password",
-                "input[name='password']",
-                "input[name='passwd']",
-                "input[type='password']",
-            ], target_account["password"], timeout=8000)
-            print(f"typed password selector: {password_selector}", flush=True)
-            assert_time_left(deadline, stage)
-
-            stage = "submit_tid_login_and_open_my"
-            print(f"stage={stage} url={safe_url(page)}", flush=True)
-            return tap_tid_login_then_open_my_page(page)
+            stage = "tap_login_join"
+            print(f"stage={stage} url={safe_url(page)} body={get_body_text(page, 160)}", flush=True)
+            physical_tap_at(page, 112, 96)
+            page.wait_for_timeout(7000)
+            print(f"after tap url={safe_url(page)} body={get_body_text(page, 220)}", flush=True)
+            return screenshot_response(page)
 
     except Exception as e:
         print(f"Error processing {account_id_to_find} at {stage}: {type(e).__name__}: {e}", flush=True)
