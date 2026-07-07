@@ -9,15 +9,9 @@ ENCRYPTION_KEY_B64 = os.environ.get("ENCRYPTION_KEY")
 ENCRYPTED_ACCOUNTS_B64 = os.environ.get("ENCRYPTED_ACCOUNTS")
 BROWSERLESS_TOKEN = os.environ.get("BROWSERLESS_TOKEN", "2Uq9iBy84O6QGwO008597820ed94cb8fb02789f1092d91545")
 MY_PAGE_URL = "https://m.sktuniverse.co.kr/my"
-TID_AUTHORIZE_URL = (
-    "https://tapi.t-id.co.kr/oidc/v20/authorize"
-    "?client_id=a1c144a9-6ab3-49f3-b03f-4ce80d257f16"
-    "&redirect_uri=https%3A%2F%2Fm.sktuniverse.co.kr%2Fmember%2Flogin%2Fchannel/tid"
-)
-MOBILE_USER_AGENT = (
-    "Mozilla/5.0 (Linux; Android 13; SM-G981B) "
-    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Mobile Safari/537.36"
-)
+LOGIN_VIEW_URL = "https://m.sktuniverse.co.kr/member/login/view?loginRedirectUrl=%2Fmy"
+TID_AUTHORIZE_URL = "https://tapi.t-id.co.kr/oidc/v20/authorize?client_id=a1c144a9-6ab3-49f3-b03f-4ce80d257f16&redirect_uri=https%3A%2F%2Fm.sktuniverse.co.kr%2Fmember%2Flogin%2Fchannel/tid"
+MOBILE_USER_AGENT = "Mozilla/5.0 (Linux; Android 13; SM-G981B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Mobile Safari/537.36"
 
 
 def decrypt_accounts():
@@ -48,9 +42,9 @@ def get_body_text(page, limit=260):
 
 def goto_page(page, url, timeout=9000, referer=None):
     try:
-        kw = {"wait_until": "domcontentloaded", "timeout": timeout}
-        if referer: kw["referer"] = referer
-        return page.goto(url, **kw)
+        args = {"wait_until": "domcontentloaded", "timeout": timeout}
+        if referer: args["referer"] = referer
+        return page.goto(url, **args)
     except Exception as exc:
         print(f"debug goto ignored url={url} current={safe_url(page)} error={type(exc).__name__}: {exc}", flush=True)
         return None
@@ -58,8 +52,7 @@ def goto_page(page, url, timeout=9000, referer=None):
 
 def screenshot_bytes(page):
     client = page.context.new_cdp_session(page)
-    data = client.send("Page.captureScreenshot", {"format": "png", "fromSurface": True})
-    return base64.b64decode(data["data"])
+    return base64.b64decode(client.send("Page.captureScreenshot", {"format": "png", "fromSurface": True})["data"])
 
 
 def screenshot_response(page):
@@ -87,7 +80,7 @@ def diagnostic_response(page, context, account_id, result, elapsed):
     except Exception: shot = Image.new("RGB", (412, 915), color=(245, 245, 245))
     img = Image.new("RGB", (shot.width + 720, max(shot.height, 980)), color=(255, 255, 255))
     img.paste(shot, (0, 0)); draw = ImageDraw.Draw(img)
-    y = 18; x = shot.width + 18
+    x = shot.width + 18; y = 18
     rows = ["T Universe login diagnostic", f"account={account_id}", f"elapsed={elapsed:.1f}s result={result}", f"url={safe_url(page)}", f"body={get_body_text(page, 520)}", "", "cookies:"] + cookie_lines(context)
     for row in rows:
         row = str(row)
@@ -112,7 +105,7 @@ def tap_locator(locator, timeout=5000):
     box = locator.bounding_box(timeout=timeout)
     if not box: raise RuntimeError("no bounding box")
     physical_tap_at(locator.page, box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
-    locator.page.wait_for_timeout(150)
+    locator.page.wait_for_timeout(120)
 
 
 def type_first_visible(page, selectors, value, timeout=6000):
@@ -170,9 +163,11 @@ def wait_for_tid_result(page, timeout_ms=10000):
 
 def open_tid_from_my(page):
     goto_page(page, MY_PAGE_URL, timeout=7000)
-    page.wait_for_timeout(700)
-    referer = safe_url(page) if "sktuniverse" in safe_url(page) else MY_PAGE_URL
-    print(f"debug my page seeded url={safe_url(page)} body={get_body_text(page, 180)}", flush=True)
+    page.wait_for_timeout(500)
+    goto_page(page, LOGIN_VIEW_URL, timeout=8000, referer=MY_PAGE_URL)
+    page.wait_for_timeout(500)
+    referer = safe_url(page) if "sktuniverse" in safe_url(page) else LOGIN_VIEW_URL
+    print(f"debug login view seeded url={safe_url(page)} body={get_body_text(page, 180)}", flush=True)
     goto_page(page, TID_AUTHORIZE_URL, timeout=12000, referer=referer)
     page.wait_for_timeout(300)
     print(f"debug direct tid url={safe_url(page)} body={get_body_text(page, 180)}", flush=True)
@@ -184,31 +179,25 @@ def handler():
     account_id = request.args.get("id")
     debug_mode = request.args.get("debug") == "1"
     if not account_id: return "Account ID is required.", 400
-
     browser = None; stage = "start"; started = time.monotonic()
     def mark(label): print(f"debug elapsed={time.monotonic() - started:.1f}s stage={label}", flush=True)
-
     try:
         stage = "decrypt_accounts"; mark(stage)
         accounts = decrypt_accounts()
         target = next((acc for acc in accounts if acc["id"] == account_id), None)
         if not target: return f"Account not found: {account_id}", 404
-
         with sync_playwright() as p:
             stage = "connect_browserless"; mark(stage)
             browser = p.chromium.connect_over_cdp(f"wss://chrome.browserless.io?token={BROWSERLESS_TOKEN}&stealth=true&timeout=60000", timeout=8000)
             context = browser.new_context(viewport={"width":412,"height":915}, user_agent=MOBILE_USER_AGENT, is_mobile=True, has_touch=True)
             page = context.new_page(); page.set_default_timeout(6000)
-
             stage = "open_tid_from_my"; mark(stage)
             open_tid_from_my(page); wait_for_tid_login_form(page, 8000)
-
             stage = "type_tid_credentials"; mark(stage)
             user_selector = type_first_visible(page, ["input#inputId", "input#userId", "input[name='userId']", "input[name='id']", "input[type='email']", "input[type='text']"], target["id"], 6000)
             print(f"typed user selector: {user_selector}", flush=True)
             password_selector = type_first_visible(page, ["input#inputPassword", "input#password", "input[name='password']", "input[name='passwd']", "input[type='password']"], target["password"], 6000)
             print(f"typed password selector: {password_selector}", flush=True)
-
             stage = "submit_tid_login"; mark(stage)
             try:
                 page.locator("button:has-text('로그인'), button:has-text('Login'), input[type='submit']").last.click(force=True, timeout=2500)
@@ -218,14 +207,12 @@ def handler():
             result = wait_for_tid_result(page, 10000)
             print(f"debug tid submit result={result} url={safe_url(page)}", flush=True)
             if debug_mode and result == "timeout": return diagnostic_response(page, context, account_id, result, time.monotonic() - started)
-
             stage = "open_my_after_login"; mark(stage)
             goto_page(page, MY_PAGE_URL, timeout=9000)
             page.wait_for_timeout(2500)
             print(f"debug final my url={safe_url(page)} body={get_body_text(page, 260)}", flush=True)
             if debug_mode: return diagnostic_response(page, context, account_id, result, time.monotonic() - started)
             return screenshot_response(page)
-
     except Exception as exc:
         print(f"Error processing {account_id} at {stage}: {type(exc).__name__}: {exc}", flush=True)
         return image_response(f"Barcode failed\nID: {account_id}\n{stage}: {type(exc).__name__}: {exc}")
