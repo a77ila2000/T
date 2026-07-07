@@ -203,7 +203,7 @@ def wait_for_tid_login_form(page, timeout_ms=8000):
         time.sleep(0.2)
     raise TimeoutError(f"T ID login form not visible. url={last_url}. body={last_body}")
 
-def wait_for_tid_result(tid_page, timeout_ms=13000):
+def wait_for_tid_result(tid_page, timeout_ms=10000):
     end = time.monotonic() + timeout_ms / 1000
     last_url = ""
     while time.monotonic() < end:
@@ -213,7 +213,7 @@ def wait_for_tid_result(tid_page, timeout_ms=13000):
         last_url = safe_url(tid_page)
         if "/member/login/channel/tid" in last_url or "code=" in last_url or "/my" in last_url:
             print(f"debug T ID callback reached: {last_url}", flush=True)
-            tid_page.wait_for_timeout(2500)
+            tid_page.wait_for_timeout(1000)
             return "callback"
         time.sleep(0.2)
     print(f"debug T ID result wait timed out at url={last_url} body={get_body_text(tid_page, 200)}", flush=True)
@@ -329,7 +329,7 @@ def handler():
                 print(f"login button locator failed, coordinate tap: {button_error}", flush=True)
                 physical_tap_at(tid_page, 195, 330)
                 physical_tap_at(tid_page, 195, 470)
-            result = wait_for_tid_result(tid_page, timeout_ms=13000)
+            result = wait_for_tid_result(tid_page, timeout_ms=10000)
             print(f"debug tid submit result={result} url={safe_url(tid_page)}", flush=True)
 
             stage = "open_my_after_login"
@@ -340,7 +340,7 @@ def handler():
                 final_page.set_default_timeout(6000)
             if "/my" not in safe_url(final_page):
                 goto_mobile_page(final_page, MY_PAGE_URL, timeout=11000)
-            final_page.wait_for_timeout(3500)
+            final_page.wait_for_timeout(1500)
             print(f"debug final my url={safe_url(final_page)} body={get_body_text(final_page, 260)}", flush=True)
             if debug_mode:
                 return diagnostic_response(final_page, context, account_id, result, time.monotonic() - started)
