@@ -65,6 +65,16 @@ def get_body_text(page, limit=260):
     except Exception:
         return ""
 
+def goto_mobile_page(page, url, timeout=10000, referer=None):
+    try:
+        kwargs = {"wait_until": "domcontentloaded", "timeout": timeout}
+        if referer:
+            kwargs["referer"] = referer
+        return page.goto(url, **kwargs)
+    except TimeoutError as goto_error:
+        print(f"debug goto timeout ignored url={url} current={safe_url(page)} error={goto_error}", flush=True)
+        return None
+
 def wait_for_any(page, selectors, timeout=6000):
     locator = page.locator(", ".join(selectors)).first
     locator.wait_for(state="visible", timeout=timeout)
@@ -157,13 +167,13 @@ def open_authorize_fallback(main_page, chooser_url):
     print("debug opening authorize fallback in same context", flush=True)
     tid_page = main_page.context.new_page()
     tid_page.set_default_timeout(6000)
-    tid_page.goto(TID_AUTHORIZE_URL, wait_until="domcontentloaded", timeout=12000, referer=chooser_url)
+    goto_mobile_page(tid_page, TID_AUTHORIZE_URL, timeout=12000, referer=chooser_url)
     tid_page.wait_for_timeout(300)
     print(f"debug fallback tid url={safe_url(tid_page)} body={get_body_text(tid_page, 180)}", flush=True)
     return tid_page
 
 def open_tid_from_my(main_page):
-    main_page.goto(MY_PAGE_URL, wait_until="domcontentloaded", timeout=12000)
+    goto_mobile_page(main_page, MY_PAGE_URL, timeout=12000)
     main_page.wait_for_timeout(500)
     print(f"debug my page before login url={safe_url(main_page)} body={get_body_text(main_page, 180)}", flush=True)
 
@@ -271,7 +281,7 @@ def handler():
             if main_page.is_closed():
                 main_page = context.new_page()
                 main_page.set_default_timeout(6000)
-            main_page.goto(MY_PAGE_URL, wait_until="domcontentloaded", timeout=11000)
+            goto_mobile_page(main_page, MY_PAGE_URL, timeout=11000)
             main_page.wait_for_timeout(800)
             print(f"debug final my url={safe_url(main_page)} body={get_body_text(main_page, 260)}", flush=True)
             return screenshot_response(main_page)
