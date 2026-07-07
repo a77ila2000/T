@@ -5,6 +5,7 @@ import base64
 from cryptography.fernet import Fernet
 from playwright.sync_api import sync_playwright, TimeoutError
 import io
+import time
 
 app = Flask(__name__)
 
@@ -30,34 +31,52 @@ def decrypt_accounts():
 def create_error_image(account_id, error):
     """오류 발생 시 보여줄 이미지 생성"""
     from PIL import Image, ImageDraw
-    img = Image.new('RGB', (320, 180), color=(255, 235, 238))
+    img = Image.new('RGB', (420, 210), color=(255, 235, 238))
     d = ImageDraw.Draw(img)
-    error_text = str(error).replace("\n", " ")[:95]
-    error_message = f"Barcode failed\nID: {account_id}\n{error_text}"
-    d.multiline_text((20, 45), error_message, fill=(211, 47, 47), align="left")
+    error_text = str(error).replace("\n", " ")[:150]
+    lines = [error_text[i:i + 42] for i in range(0, len(error_text), 42)]
+    error_message = "\n".join(["Barcode failed", f"ID: {account_id}"] + lines[:4])
+    d.multiline_text((18, 34), error_message, fill=(211, 47, 47), align="left")
     img_byte_arr = io.BytesIO()
     img.save(img_byte_arr, format='PNG')
     return Response(img_byte_arr.getvalue(), mimetype='image/png')
 
-def click_if_visible(page, selector, timeout=5000):
+def seconds_left(deadline):
+    return max(0.5, deadline - time.monotonic())
+
+def assert_time_left(deadline, stage):
+    if seconds_left(deadline) < 3:
+        raise TimeoutError(f"deadline reached before {stage}")
+
+def click_if_visible(page, selector, timeout=4000):
     try:
         page.wait_for_selector(selector, state='visible', timeout=timeout)
-        page.click(selector)
+        page.click(selector, timeout=timeout)
         return True
     except Exception as e:
-        print(f"skip selector {selector}: {e}")
+        print(f"skip selector {selector}: {e}", flush=True)
         return False
 
-def wait_and_fill(page, selectors, value, timeout=15000):
-    last_error = None
-    for selector in selectors:
+def fill_first_visible(page, selectors, value, timeout=8000):
+    joined = ", ".join(selectors)
+    locator = page.locator(joined).first
+    try:
+        locator.wait_for(state='visible', timeout=timeout)
+        locator.fill(value, timeout=timeout)
+        return locator.evaluate("e => e.id || e.name || e.type || e.tagName")
+    except Exception as e:
+        body_text = ""
         try:
-            page.wait_for_selector(selector, state='visible', timeout=timeout)
-            page.fill(selector, value)
-            return selector
-        except Exception as e:
-            last_error = e
-    raise TimeoutError(f"No visible input matched {selectors}: {last_error}")
+            body_text = page.locator('body').inner_text(timeout=1000).replace("\n", " | ")[:120]
+        except Exception:
+            pass
+        raise TimeoutError(f"No visible input matched after {timeout}ms. selectors={selectors}. url={page.url}. body={body_text}. err={e}")
+
+def wait_for_any(page, selectors, timeout=8000):
+    joined = ", ".join(selectors)
+    locator = page.locator(joined).first
+    locator.wait_for(state='visible', timeout=timeout)
+    return locator
 
 @app.route('/api/get_barcode', methods=['GET'])
 def handler():
@@ -67,6 +86,7 @@ def handler():
 
     browser = None
     stage = "start"
+    deadline = time.monotonic() + 52
 
     try:
         stage = "decrypt_accounts"
@@ -78,74 +98,90 @@ def handler():
 
         with sync_playwright() as p:
             stage = "connect_browserless"
-            browser = p.chromium.connect_over_cdp(f"wss://chrome.browserless.io?token={BROWSERLESS_TOKEN}")
+            browser = p.chromium.connect_over_cdp(
+                f"wss://chrome.browserless.io?token={BROWSERLESS_TOKEN}",
+                timeout=10000,
+            )
             page = browser.new_page(
                 viewport={"width": 390, "height": 844},
                 user_agent=MOBILE_USER_AGENT,
             )
-            page.set_default_timeout(15000)
+            page.set_default_timeout(8000)
 
             stage = "open_my_page"
-            page.goto("https://m.sktuniverse.co.kr/my", wait_until='domcontentloaded', timeout=25000)
-            page.wait_for_timeout(5000)
+            print(f"stage={stage}", flush=True)
+            page.goto("https://m.sktuniverse.co.kr/my", wait_until='domcontentloaded', timeout=18000)
+            page.wait_for_timeout(2500)
+            assert_time_left(deadline, stage)
 
             stage = "open_login_page"
-            if click_if_visible(page, '#go-login-btn', timeout=8000):
-                page.wait_for_timeout(3000)
+            print(f"stage={stage} url={page.url}", flush=True)
+            if click_if_visible(page, '#go-login-btn', timeout=5000):
+                page.wait_for_timeout(2500)
+            assert_time_left(deadline, stage)
 
             stage = "select_tid_login"
-            if click_if_visible(page, '#link-to-tid-login', timeout=12000):
-                page.wait_for_timeout(5000)
+            print(f"stage={stage} url={page.url}", flush=True)
+            if click_if_visible(page, '#link-to-tid-login', timeout=7000):
+                page.wait_for_timeout(3000)
+            assert_time_left(deadline, stage)
 
             stage = "fill_credentials"
-            user_selector = wait_and_fill(page, [
+            print(f"stage={stage} url={page.url}", flush=True)
+            user_selector = fill_first_visible(page, [
                 'input#userId',
                 'input[name="userId"]',
                 'input[name="id"]',
-                'input[type="text"]:visible',
-                'input[type="email"]:visible',
-            ], target_account['id'])
-            print(f"filled user selector: {user_selector}")
+                'input[type="email"]',
+                'input[type="text"]:not(#add-slot-search-proxy)',
+            ], target_account['id'], timeout=8000)
+            print(f"filled user selector: {user_selector}", flush=True)
 
-            password_selector = wait_and_fill(page, [
+            password_selector = fill_first_visible(page, [
                 'input#password',
                 'input[name="password"]',
                 'input[name="passwd"]',
-                'input[type="password"]:visible',
-            ], target_account['password'])
-            print(f"filled password selector: {password_selector}")
+                'input[type="password"]',
+            ], target_account['password'], timeout=8000)
+            print(f"filled password selector: {password_selector}", flush=True)
+            assert_time_left(deadline, stage)
 
             stage = "submit_login"
-            login_clicked = False
-            for selector in [
+            print(f"stage={stage} url={page.url}", flush=True)
+            login_button = wait_for_any(page, [
                 'button#loginBtn',
                 'button[type="submit"]:has-text("로그인")',
                 'button:has-text("로그인")',
                 'input[type="submit"]',
-            ]:
-                if click_if_visible(page, selector, timeout=5000):
-                    login_clicked = True
-                    break
-            if not login_clicked:
-                raise TimeoutError("No login submit button matched")
+            ], timeout=8000)
+            login_button.click(timeout=8000)
+            assert_time_left(deadline, stage)
 
             stage = "wait_barcode_button"
-            barcode_button_selector = "button.btn_barcode"
-            page.wait_for_selector(barcode_button_selector, state='visible', timeout=20000)
-            page.click(barcode_button_selector)
+            print(f"stage={stage} url={page.url}", flush=True)
+            barcode_button = wait_for_any(page, [
+                'button.btn_barcode',
+                'button:has-text("바코드")',
+                '[aria-label*="바코드"]',
+            ], timeout=min(12000, int(seconds_left(deadline) * 1000)))
+            barcode_button.click(timeout=5000)
+            assert_time_left(deadline, stage)
 
             stage = "wait_barcode_popup"
-            barcode_popup_selector = "div.modal_pop_wrap.on div.barcode_box"
-            page.wait_for_selector(barcode_popup_selector, state='visible', timeout=10000)
+            print(f"stage={stage} url={page.url}", flush=True)
+            barcode_popup = wait_for_any(page, [
+                'div.modal_pop_wrap.on div.barcode_box',
+                '.barcode_box',
+                '[class*="barcode"]',
+            ], timeout=min(8000, int(seconds_left(deadline) * 1000)))
 
             stage = "screenshot_barcode"
-            barcode_element = page.locator(barcode_popup_selector)
-            screenshot_bytes = barcode_element.screenshot(type='png')
+            screenshot_bytes = barcode_popup.screenshot(type='png')
 
             return Response(screenshot_bytes, mimetype='image/png')
 
     except Exception as e:
-        print(f"Error processing {account_id_to_find} at {stage}: {type(e).__name__}: {e}")
+        print(f"Error processing {account_id_to_find} at {stage}: {type(e).__name__}: {e}", flush=True)
         return create_error_image(account_id_to_find, f"{stage}: {type(e).__name__}: {e}")
 
     finally:
@@ -153,4 +189,4 @@ def handler():
             try:
                 browser.close()
             except Exception as e:
-                print(f"browser close failed: {e}")
+                print(f"browser close failed: {e}", flush=True)
