@@ -52,7 +52,7 @@ def handler():
         with sync_playwright() as p:
             # [수정] Vercel 자체 크롬 대신, 외부의 Browserless 원격 크롬 브라우저에 연결합니다.
             # 아래 토큰 영역에 회원가입 후 발급받은 실제 토큰을 대입하거나 Vercel 환경변수로 관리하셔도 됩니다.
-            browser = p.chromium.connect_over_cdp("wss://chrome.browserless.io?token=YOUR_BROWSERLESS_API_TOKEN")
+            browser = p.chromium.connect_over_cdp("wss://chrome.browserless.io?token=2Uq9iBy84O6QGwO008597820ed94cb8fb02789f1092d91545")
             page = browser.new_page()
             
             page.goto("https://m.sktuniverse.co.kr/my", wait_until='domcontentloaded', timeout=25000)
