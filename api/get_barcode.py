@@ -6,7 +6,6 @@ from cryptography.fernet import Fernet
 from playwright.sync_api import sync_playwright, TimeoutError
 import io
 import time
-from urllib.parse import quote
 
 app = Flask(__name__)
 
@@ -73,6 +72,28 @@ def wait_for_any(page, selectors, timeout=10000):
     locator.wait_for(state="visible", timeout=timeout)
     return locator
 
+def new_mobile_page(browser):
+    page = browser.new_page(
+        viewport={"width": 390, "height": 844},
+        user_agent=MOBILE_USER_AGENT,
+        is_mobile=True,
+        has_touch=True,
+    )
+    page.set_default_timeout(10000)
+    return page
+
+def alive_page(browser, preferred_context=None):
+    if preferred_context:
+        try:
+            for candidate in preferred_context.pages:
+                if not candidate.is_closed():
+                    candidate.set_default_timeout(10000)
+                    return candidate
+            return preferred_context.new_page()
+        except Exception as context_error:
+            print(f"preferred context unavailable: {context_error}", flush=True)
+    return new_mobile_page(browser)
+
 def physical_tap_at(page, x, y):
     try:
         page.touchscreen.tap(x, y)
@@ -127,9 +148,9 @@ def wait_for_logged_in_my(page, timeout_ms=12000):
     last_body = ""
     while time.monotonic() < end:
         last_body = get_body_text(page, 300)
-        if "로그인" not in last_body and "회원가입" not in last_body:
-            return True
         if "패밀리 혜택 관리" in last_body or "쿠폰" in last_body:
+            return True
+        if "로그인" not in last_body and "회원가입" not in last_body:
             return True
         time.sleep(0.7)
     print(f"debug my page still appears logged out/body={last_body}", flush=True)
@@ -153,13 +174,8 @@ def handler():
         with sync_playwright() as p:
             stage = "connect_browserless"
             browser = p.chromium.connect_over_cdp(build_browserless_url(), timeout=10000)
-            page = browser.new_page(
-                viewport={"width": 390, "height": 844},
-                user_agent=MOBILE_USER_AGENT,
-                is_mobile=True,
-                has_touch=True,
-            )
-            page.set_default_timeout(10000)
+            page = new_mobile_page(browser)
+            login_context = page.context
 
             stage = "prime_t_universe_login_session"
             print(f"stage={stage}", flush=True)
@@ -204,11 +220,12 @@ def handler():
             print(f"debug after tid submit url={safe_url(page)} body={get_body_text(page, 220)}", flush=True)
 
             stage = "open_my_after_login"
-            page.goto(MY_PAGE_URL, wait_until="domcontentloaded", timeout=25000)
-            page.wait_for_timeout(7000)
-            wait_for_logged_in_my(page, timeout_ms=8000)
-            print(f"debug final my url={safe_url(page)} body={get_body_text(page, 260)}", flush=True)
-            return screenshot_response(page)
+            final_page = alive_page(browser, login_context)
+            final_page.goto(MY_PAGE_URL, wait_until="domcontentloaded", timeout=25000)
+            final_page.wait_for_timeout(7000)
+            wait_for_logged_in_my(final_page, timeout_ms=8000)
+            print(f"debug final my url={safe_url(final_page)} body={get_body_text(final_page, 260)}", flush=True)
+            return screenshot_response(final_page)
 
     except Exception as e:
         print(f"Error processing {account_id} at {stage}: {type(e).__name__}: {e}", flush=True)
