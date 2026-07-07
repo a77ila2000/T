@@ -1,0 +1,18 @@
+{
+  "builds": [
+    {
+      "src": "api/get_barcode.py",
+      "use": "@vercel/python"
+    }
+  ],
+  "routes": [
+    {
+      "src": "/api/(.*)",
+      "dest": "api/get_barcode.py"
+    },
+    {
+      "src": "/(.*)",
+      "dest": "public/$1"
+    }
+  ]
+}
