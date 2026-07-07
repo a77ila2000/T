@@ -54,15 +54,15 @@ def handler():
             # 아래 토큰 영역에 회원가입 후 발급받은 실제 토큰을 대입하거나 Vercel 환경변수로 관리하셔도 됩니다.
             browser = p.chromium.connect_over_cdp("wss://chrome.browserless.io?token=2Uq9iBy84O6QGwO008597820ed94cb8fb02789f1092d91545")
             page = browser.new_page()
-            
-           page.goto("https://m.sktuniverse.co.kr/my", wait_until='domcontentloaded', timeout=25000)
-            
+
+            page.goto("https://m.sktuniverse.co.kr/my", wait_until='domcontentloaded', timeout=25000)
+
             # [보완] 로그인 수단 선택 화면 처리 및 전환 대기
             try:
                 # "T아이디로 이용하기" 버튼이 나타날 때까지 최대 5초 대기
                 page.wait_for_selector('text="T아이디로 이용하기"', timeout=5000)
                 page.click('text="T아이디로 이용하기"')
-                
+
                 # ★ 중요: 버튼 클릭 후 실제 아이디 입력창('input#userId')이 화면에 로딩될 때까지 최대 5초간 명시적으로 대기합니다.
                 page.wait_for_selector('input#userId', timeout=5000)
             except Exception as e:
@@ -82,10 +82,10 @@ def handler():
 
             barcode_popup_selector = "div.modal_pop_wrap.on div.barcode_box"
             page.wait_for_selector(barcode_popup_selector, timeout=10000)
-            
+
             barcode_element = page.locator(barcode_popup_selector)
             screenshot_bytes = barcode_element.screenshot(type='png')
-            
+
             browser.close()
             return Response(screenshot_bytes, mimetype='image/png')
 
