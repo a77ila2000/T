@@ -292,8 +292,14 @@ def handler():
                 physical_tap(login_button, timeout=4500)
             except Exception as button_error:
                 print(f"login button locator failed, coordinate tap: {button_error}", flush=True)
-                physical_tap_at(tid_page, 195, 330)
-                physical_tap_at(tid_page, 195, 470)
+            tid_page.wait_for_timeout(250)
+            physical_tap_at(tid_page, 206, 470)
+            tid_page.wait_for_timeout(250)
+            try:
+                tid_page.keyboard.press("Enter")
+                print("debug pressed Enter after submit tap", flush=True)
+            except Exception as enter_error:
+                print(f"debug Enter submit failed: {enter_error}", flush=True)
             result = wait_for_tid_result(tid_page, timeout_ms=10000)
             print(f"debug tid submit result={result} url={safe_url(tid_page)}", flush=True)
             if debug_mode and result == "timeout":
