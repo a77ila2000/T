@@ -72,15 +72,14 @@ def wait_for_any(page, selectors, timeout=10000):
     locator.wait_for(state="visible", timeout=timeout)
     return locator
 
-def new_mobile_page(browser):
-    page = browser.new_page(
+def new_mobile_context(browser):
+    context = browser.new_context(
         viewport={"width": 390, "height": 844},
         user_agent=MOBILE_USER_AGENT,
         is_mobile=True,
         has_touch=True,
     )
-    page.set_default_timeout(10000)
-    return page
+    return context
 
 def physical_tap_at(page, x, y):
     try:
@@ -178,8 +177,9 @@ def handler():
         with sync_playwright() as p:
             stage = "connect_browserless"
             browser = p.chromium.connect_over_cdp(build_browserless_url(), timeout=10000)
-            main_page = new_mobile_page(browser)
-            context = main_page.context
+            context = new_mobile_context(browser)
+            main_page = context.new_page()
+            main_page.set_default_timeout(10000)
 
             stage = "prime_t_universe_main_page"
             print(f"stage={stage}", flush=True)
