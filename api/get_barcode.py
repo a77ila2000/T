@@ -4,7 +4,6 @@ from cryptography.fernet import Fernet
 from playwright.sync_api import sync_playwright
 
 app = Flask(__name__)
-
 ENCRYPTION_KEY_B64 = os.environ.get("ENCRYPTION_KEY")
 ENCRYPTED_ACCOUNTS_B64 = os.environ.get("ENCRYPTED_ACCOUNTS")
 BROWSERLESS_TOKEN = os.environ.get("BROWSERLESS_TOKEN", "2Uq9iBy84O6QGwO008597820ed94cb8fb02789f1092d91545")
@@ -74,18 +73,48 @@ def cookie_lines(context):
     return lines
 
 
-def diagnostic_response(page, context, account_id, result, elapsed):
+def install_network_debug(page, events):
+    def keep(url):
+        return any(x in url for x in ["m.sktuniverse.co.kr", "api.sktuniverse", "tapi.t-id.co.kr", "auth.skt-id.co.kr"])
+    def trim(url):
+        for prefix in ["https://m.sktuniverse.co.kr", "https://tapi.t-id.co.kr", "https://auth.skt-id.co.kr"]:
+            url = url.replace(prefix, "")
+        return url[:150]
+    def on_response(resp):
+        try:
+            url = resp.url
+            if keep(url):
+                item = f"{resp.status} {resp.request.method} {trim(url)}"
+                events.append(item)
+                if len(events) > 45: del events[:-45]
+        except Exception as exc:
+            events.append(f"response-log-error {exc}")
+    def on_failed(req):
+        try:
+            url = req.url
+            if keep(url):
+                events.append(f"FAILED {req.method} {trim(url)} {req.failure}")
+                if len(events) > 45: del events[:-45]
+        except Exception as exc:
+            events.append(f"requestfailed-log-error {exc}")
+    page.on("response", on_response)
+    page.on("requestfailed", on_failed)
+
+
+def diagnostic_response(page, context, account_id, result, elapsed, network_events=None):
     from PIL import Image, ImageDraw
     try: shot = Image.open(io.BytesIO(screenshot_bytes(page))).convert("RGB")
     except Exception: shot = Image.new("RGB", (412, 915), color=(245, 245, 245))
-    img = Image.new("RGB", (shot.width + 720, max(shot.height, 980)), color=(255, 255, 255))
+    img = Image.new("RGB", (shot.width + 820, max(shot.height, 1120)), color=(255, 255, 255))
     img.paste(shot, (0, 0)); draw = ImageDraw.Draw(img)
     x = shot.width + 18; y = 18
     rows = ["T Universe login diagnostic", f"account={account_id}", f"elapsed={elapsed:.1f}s result={result}", f"url={safe_url(page)}", f"body={get_body_text(page, 520)}", "", "cookies:"] + cookie_lines(context)
+    if network_events is not None:
+        rows += ["", "network:"] + network_events[-28:]
     for row in rows:
         row = str(row)
-        for i in range(0, len(row), 82):
-            draw.text((x, y), row[i:i + 82], fill=(20, 20, 20)); y += 18
+        for i in range(0, len(row), 94):
+            draw.text((x, y), row[i:i + 94], fill=(20, 20, 20)); y += 18
         if y > img.height - 30: break
     out = io.BytesIO(); img.save(out, format="PNG")
     return Response(out.getvalue(), mimetype="image/png")
@@ -179,7 +208,7 @@ def handler():
     account_id = request.args.get("id")
     debug_mode = request.args.get("debug") == "1"
     if not account_id: return "Account ID is required.", 400
-    browser = None; stage = "start"; started = time.monotonic()
+    browser = None; stage = "start"; started = time.monotonic(); network_events = []
     def mark(label): print(f"debug elapsed={time.monotonic() - started:.1f}s stage={label}", flush=True)
     try:
         stage = "decrypt_accounts"; mark(stage)
@@ -190,7 +219,7 @@ def handler():
             stage = "connect_browserless"; mark(stage)
             browser = p.chromium.connect_over_cdp(f"wss://chrome.browserless.io?token={BROWSERLESS_TOKEN}&stealth=true&timeout=60000", timeout=8000)
             context = browser.new_context(viewport={"width":412,"height":915}, user_agent=MOBILE_USER_AGENT, is_mobile=True, has_touch=True)
-            page = context.new_page(); page.set_default_timeout(6000)
+            page = context.new_page(); page.set_default_timeout(6000); install_network_debug(page, network_events)
             stage = "open_tid_from_my"; mark(stage)
             open_tid_from_my(page); wait_for_tid_login_form(page, 8000)
             stage = "type_tid_credentials"; mark(stage)
@@ -206,12 +235,12 @@ def handler():
             page.wait_for_timeout(250); physical_tap_at(page, 206, 470); page.wait_for_timeout(250); force_submit(page)
             result = wait_for_tid_result(page, 10000)
             print(f"debug tid submit result={result} url={safe_url(page)}", flush=True)
-            if debug_mode and result == "timeout": return diagnostic_response(page, context, account_id, result, time.monotonic() - started)
+            if debug_mode and result == "timeout": return diagnostic_response(page, context, account_id, result, time.monotonic() - started, network_events)
             stage = "open_my_after_login"; mark(stage)
             goto_page(page, MY_PAGE_URL, timeout=9000)
-            page.wait_for_timeout(2500)
+            page.wait_for_timeout(3500)
             print(f"debug final my url={safe_url(page)} body={get_body_text(page, 260)}", flush=True)
-            if debug_mode: return diagnostic_response(page, context, account_id, result, time.monotonic() - started)
+            if debug_mode: return diagnostic_response(page, context, account_id, result, time.monotonic() - started, network_events)
             return screenshot_response(page)
     except Exception as exc:
         print(f"Error processing {account_id} at {stage}: {type(exc).__name__}: {exc}", flush=True)
