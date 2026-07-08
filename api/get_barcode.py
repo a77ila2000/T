@@ -162,10 +162,10 @@ def set_cached_barcode(account_id, number, seconds_left, barcode_type="universe"
             if sibling:
                 sibling_next = int(get_warm_state(sibling).get("next_refresh_at") or 0)
                 if sibling_next and abs(next_refresh_at - sibling_next) < WARM_STAGGER_INTERVAL:
-                    if next_refresh_at < sibling_next:
-                        next_refresh_at = max(now, sibling_next - WARM_STAGGER_INTERVAL)
-                    else:
-                        next_refresh_at = sibling_next + WARM_STAGGER_INTERVAL
+                    # Only ever pull the schedule earlier for separation, never push it later -
+                    # delaying past this barcode's own real expiry would leave it stuck stale
+                    # while the scheduler still thinks nothing is due.
+                    next_refresh_at = max(now, min(next_refresh_at, sibling_next - WARM_STAGGER_INTERVAL))
             set_warm_state(target, {
                 "next_refresh_at": next_refresh_at,
                 "last_success_at": now,
