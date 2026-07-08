@@ -26,6 +26,7 @@ WARM_TARGETS = [
 ]
 WARM_SUCCESS_INTERVAL = 20 * 60
 WARM_FAIL_INTERVAL = 3 * 60
+WARM_STAGGER_INTERVAL = 3 * 60
 LAST_BARCODE_RETENTION = 7 * 24 * 60 * 60
 
 CODE128_PATTERNS = [
@@ -155,8 +156,18 @@ def set_cached_barcode(account_id, number, seconds_left, barcode_type="universe"
         now = int(time.time())
         existing = get_warm_state(target)
         if write_result == "OK":
+            next_refresh_at = now + min(ttl, WARM_SUCCESS_INTERVAL)
+            sibling_type = "general" if barcode_type == "universe" else "universe"
+            sibling = next((item for item in WARM_TARGETS if item["id"] == account_id and item["type"] == sibling_type), None)
+            if sibling:
+                sibling_next = int(get_warm_state(sibling).get("next_refresh_at") or 0)
+                if sibling_next and abs(next_refresh_at - sibling_next) < WARM_STAGGER_INTERVAL:
+                    if next_refresh_at < sibling_next:
+                        next_refresh_at = max(now, sibling_next - WARM_STAGGER_INTERVAL)
+                    else:
+                        next_refresh_at = sibling_next + WARM_STAGGER_INTERVAL
             set_warm_state(target, {
-                "next_refresh_at": now + min(ttl, WARM_SUCCESS_INTERVAL),
+                "next_refresh_at": next_refresh_at,
                 "last_success_at": now,
                 "last_failure_at": existing.get("last_failure_at", 0),
                 "last_number": str(number),
