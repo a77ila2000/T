@@ -60,10 +60,11 @@
 
             const cardContainer = document.getElementById('card-container');
             const BARCODE_VALID_TIME = 20 * 60;
-            const INITIAL_STAGGER_MS = 10 * 60 * 1000;
+            const CLIENT_WARM_INTERVAL_MS = 3 * 60 * 1000;
             const refreshQueue = [];
             const queuedKeys = new Set();
             let queueRunning = false;
+            let warmWorkerRunning = false;
 
             accounts.forEach(account => {
                 const card = document.createElement('div');
@@ -99,15 +100,15 @@
                     button.addEventListener('click', () => {
                         const barcodeType = button.dataset.type;
                         selectBarcodeType(account.id, barcodeType);
-                        enqueueBarcode(account.id, barcodeType, { manual: true, preserveDisplay: false });
                     });
                 });
             });
 
-            accounts.forEach((account, index) => {
+            accounts.forEach(account => {
                 fetchBarcode(account.id, 'universe', { cacheOnly: true, preserveDisplay: true, quietMiss: true });
-                setTimeout(() => enqueueBarcode(account.id, 'universe', { auto: true, preserveDisplay: true }), index * INITIAL_STAGGER_MS);
             });
+            runWarmWorker();
+            setInterval(runWarmWorker, CLIENT_WARM_INTERVAL_MS);
 
             function queueKey(accountId, barcodeType) {
                 return `${accountId}:${barcodeType}`;
@@ -188,6 +189,52 @@
 
             function delay(ms) {
                 return new Promise(resolve => setTimeout(resolve, ms));
+            }
+
+            async function runWarmWorker() {
+                if (warmWorkerRunning) return;
+                warmWorkerRunning = true;
+                let next = null;
+                let success = false;
+                let httpCode = '';
+                try {
+                    const nextResponse = await fetch(`/api/warm_next?t=${Date.now()}`, { cache: 'no-store' });
+                    if (!nextResponse.ok) return;
+                    next = await nextResponse.json();
+                    if (next.status !== 'ok') return;
+
+                    const response = await fetch(`/api/get_barcode?id=${next.id}&type=${next.type}&warm=1&t=${Date.now()}`, {
+                        cache: 'no-store'
+                    });
+                    httpCode = String(response.status);
+                    success = response.ok && (response.headers.get('Content-Type') || '').startsWith('image/');
+                    if (success) {
+                        await response.blob();
+                        const card = document.getElementById(`card-${next.id}`);
+                        if (card && card.dataset.currentType === next.type) {
+                            fetchBarcode(next.id, next.type, { cacheOnly: true, preserveDisplay: false, quietMiss: true });
+                        }
+                    }
+                } catch (error) {
+                    httpCode = error.name || 'client_error';
+                } finally {
+                    if (next && next.status === 'ok' && next.token) {
+                        const params = new URLSearchParams({
+                            id: next.id,
+                            type: next.type,
+                            token: next.token,
+                            success: success ? '1' : '0',
+                            http_code: httpCode,
+                            t: String(Date.now())
+                        });
+                        try {
+                            await fetch(`/api/warm_done?${params.toString()}`, { cache: 'no-store' });
+                        } catch (error) {
+                            // The lock expires on the server if this best-effort release fails.
+                        }
+                    }
+                    warmWorkerRunning = false;
+                }
             }
 
             async function fetchBarcode(accountId, barcodeType, options = {}) {
@@ -326,8 +373,8 @@
                         delete img.dataset.timerId;
                         if (img.dataset.refreshQueued !== '1') {
                             img.dataset.refreshQueued = '1';
-                            statusEl.textContent = '20분이 지나 자동 갱신 중입니다.';
-                            enqueueBarcode(accountId, barcodeType, { auto: true, preserveDisplay: true });
+                            statusEl.textContent = '20분이 지나 순차 갱신 대기 중입니다.';
+                            runWarmWorker();
                         }
                     }
                 };
