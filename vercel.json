@@ -3,6 +3,14 @@
     {
       "source": "/api/get_barcode",
       "destination": "/api/get_barcode.py"
+    },
+    {
+      "source": "/api/warm_next",
+      "destination": "/api/warm_next.py"
+    },
+    {
+      "source": "/api/warm_done",
+      "destination": "/api/warm_done.py"
     }
   ],
   "headers": [
@@ -19,6 +27,12 @@
   "functions": {
     "api/get_barcode.py": {
       "maxDuration": 60
+    },
+    "api/warm_next.py": {
+      "maxDuration": 30
+    },
+    "api/warm_done.py": {
+      "maxDuration": 30
     }
   }
 }
