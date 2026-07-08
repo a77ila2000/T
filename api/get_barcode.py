@@ -723,16 +723,22 @@ def warm_done():
         return json_response({"status": "unknown_target"}, 404)
     now = int(time.time())
     existing = get_warm_state(target)
-    state = {
-        "next_refresh_at": now + (WARM_SUCCESS_INTERVAL if success else WARM_FAIL_INTERVAL),
-        "last_success_at": existing.get("last_success_at", 0),
-        "last_failure_at": existing.get("last_failure_at", 0),
-        "last_http_code": http_code,
-    }
     if success:
-        state["last_success_at"] = now
+        # set_cached_barcode already recorded the correct next_refresh_at for this
+        # refresh (ttl-aware and staggered against the sibling barcode type) as part
+        # of the get_barcode call - don't clobber it with a flat +20m here.
+        state = dict(existing)
+        state.setdefault("next_refresh_at", now + WARM_SUCCESS_INTERVAL)
+        state["last_http_code"] = http_code
     else:
-        state["last_failure_at"] = now
+        state = {
+            "next_refresh_at": now + WARM_FAIL_INTERVAL,
+            "last_success_at": existing.get("last_success_at", 0),
+            "last_failure_at": now,
+            "last_number": existing.get("last_number", ""),
+            "last_grade": existing.get("last_grade", ""),
+            "last_http_code": http_code,
+        }
     set_warm_state(target, state)
     release_warm_lock(token)
     return json_response({"status": "recorded", "success": success, "next_refresh_at": state["next_refresh_at"]})
