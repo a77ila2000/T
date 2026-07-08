@@ -26,6 +26,7 @@ WARM_TARGETS = [
 ]
 WARM_SUCCESS_INTERVAL = 20 * 60
 WARM_FAIL_INTERVAL = 3 * 60
+LAST_BARCODE_RETENTION = 7 * 24 * 60 * 60
 
 CODE128_PATTERNS = [
     "212222", "222122", "222221", "121223", "121322", "131222", "122213", "122312", "132212", "221213",
@@ -115,13 +116,17 @@ def release_browser_lock(token):
         print(f"redis lock release failed: {exc}", flush=True)
 
 
-def get_cached_barcode(account_id, barcode_type="universe"):
+def get_cached_barcode(account_id, barcode_type="universe", allow_stale=False):
     barcode_type = normalize_barcode_type(barcode_type)
     memory_key = f"{barcode_type}:{account_id}"
     cached = BARCODE_CACHE.get(memory_key)
     now = time.time()
-    if cached and cached.get("expires_at", 0) > now + 5:
-        return cached
+    if cached:
+        cached = dict(cached)
+        cached["seconds_left"] = max(0, int(cached.get("expires_at", 0) - now))
+        cached["stale"] = cached.get("expires_at", 0) <= now + 5
+        if allow_stale or not cached["stale"]:
+            return cached
 
     raw = redis_command(["GET", cache_key(account_id, barcode_type)])
     if not raw and barcode_type == "universe":
@@ -130,7 +135,9 @@ def get_cached_barcode(account_id, barcode_type="universe"):
         return None
     try:
         value = json.loads(raw)
-        if value.get("expires_at", 0) <= now + 5:
+        value["seconds_left"] = max(0, int(value.get("expires_at", 0) - now))
+        value["stale"] = value.get("expires_at", 0) <= now + 5
+        if value["stale"] and not allow_stale:
             return None
         BARCODE_CACHE[memory_key] = value
         return value
@@ -142,9 +149,14 @@ def get_cached_barcode(account_id, barcode_type="universe"):
 def set_cached_barcode(account_id, number, seconds_left, barcode_type="universe", grade=""):
     barcode_type = normalize_barcode_type(barcode_type)
     ttl = max(1, int(seconds_left or 1200))
-    value = {"number": str(number), "expires_at": time.time() + ttl, "grade": str(grade or "")}
+    value = {
+        "number": str(number),
+        "expires_at": time.time() + ttl,
+        "grade": str(grade or ""),
+        "created_at": time.time(),
+    }
     BARCODE_CACHE[f"{barcode_type}:{account_id}"] = value
-    redis_command(["SET", cache_key(account_id, barcode_type), json.dumps(value), "EX", ttl])
+    redis_command(["SET", cache_key(account_id, barcode_type), json.dumps(value), "EX", LAST_BARCODE_RETENTION])
     target = next((item for item in WARM_TARGETS if item["id"] == account_id and item["type"] == barcode_type), None)
     if target:
         now = int(time.time())
@@ -253,7 +265,7 @@ def screenshot_response(page):
     except Exception as exc: return image_response(f"screenshot failed: {exc}. url={safe_url(page)} body={get_body_text(page)}")
 
 
-def barcode_response(number, seconds_left=1200, grade=""):
+def barcode_response(number, seconds_left=1200, grade="", stale=False):
     from PIL import Image, ImageDraw, ImageFont
     number = re.sub(r"\D", "", str(number))
     if not number:
@@ -280,7 +292,9 @@ def barcode_response(number, seconds_left=1200, grade=""):
     resp = Response(out.getvalue(), mimetype="image/png")
     resp.headers["Cache-Control"] = "no-store, max-age=0"
     resp.headers["X-Barcode-Number"] = number
-    resp.headers["X-Barcode-Seconds-Left"] = str(max(1, int(seconds_left or 1200)))
+    resp.headers["X-Barcode-Seconds-Left"] = str(max(0, int(seconds_left or 0)))
+    resp.headers["X-Barcode-Stale"] = "1" if stale else "0"
+    resp.headers["X-Barcode-Status"] = "stale" if stale else "valid"
     if grade:
         resp.headers["X-Membership-Grade"] = str(grade)
     return resp
@@ -721,7 +735,7 @@ def warm_status():
     targets = []
     for item in WARM_TARGETS:
         state = get_warm_state(item)
-        cached = get_cached_barcode(item["id"], item["type"])
+        cached = get_cached_barcode(item["id"], item["type"], allow_stale=True)
         targets.append({
             "id": item["id"],
             "type": item["type"],
@@ -730,7 +744,8 @@ def warm_status():
             "last_success_at": int(state.get("last_success_at") or 0),
             "last_failure_at": int(state.get("last_failure_at") or 0),
             "has_cache": bool(cached),
-            "seconds_left": int(cached["expires_at"] - time.time()) if cached else 0,
+            "stale": bool(cached and cached.get("stale")),
+            "seconds_left": int(cached.get("seconds_left", 0)) if cached else 0,
         })
     return json_response({"status": "ok", "now": now, "current": current, "targets": targets})
 
@@ -756,14 +771,17 @@ def handler():
             return f"Account not found: {account_id}", 404
         cached = get_cached_barcode(account_id, barcode_type)
         if not debug_mode and cached:
-            return barcode_response(cached["number"], int(cached["expires_at"] - time.time()), cached.get("grade", ""))
+            return barcode_response(cached["number"], cached.get("seconds_left", 0), cached.get("grade", ""), cached.get("stale", False))
         if cache_only:
+            cached = get_cached_barcode(account_id, barcode_type, allow_stale=True)
+            if not debug_mode and cached:
+                return barcode_response(cached["number"], cached.get("seconds_left", 0), cached.get("grade", ""), cached.get("stale", False))
             return "No cached barcode", 404
         lock_token = acquire_browser_lock(account_id)
         if UPSTASH_REDIS_REST_URL and UPSTASH_REDIS_REST_TOKEN and not lock_token:
-            cached = get_cached_barcode(account_id, barcode_type)
+            cached = get_cached_barcode(account_id, barcode_type, allow_stale=True)
             if not debug_mode and cached:
-                return barcode_response(cached["number"], int(cached["expires_at"] - time.time()), cached.get("grade", ""))
+                return barcode_response(cached["number"], cached.get("seconds_left", 0), cached.get("grade", ""), cached.get("stale", False))
             resp = image_response(f"Another barcode refresh is already running\nID: {account_id}\nRetry shortly", color=(255, 248, 225))
             resp.status_code = 423
             resp.headers["Retry-After"] = "75"

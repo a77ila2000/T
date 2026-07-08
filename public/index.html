@@ -10,6 +10,7 @@
     <div class="dashboard">
         <header>
             <h1>T우주 가족 바코드</h1>
+            <div id="warm-status-banner" class="warm-status-banner">자동 갱신 상태를 확인 중입니다</div>
         </header>
 
         <main id="card-container"></main>
@@ -214,7 +215,16 @@
                     if (!response.ok) return;
                     const status = await response.json();
                     const current = status.current;
-                    if (!current) return;
+                    const banner = document.getElementById('warm-status-banner');
+                    if (!current) {
+                        const dueTargets = (status.targets || []).filter(target => Number(target.next_refresh_at || 0) <= status.now);
+                        banner.textContent = dueTargets.length
+                            ? `자동 갱신 대기 ${dueTargets.length}개`
+                            : '자동 갱신 대기 중인 바코드가 없습니다';
+                        return;
+                    }
+                    const account = accounts.find(item => item.id === current.id);
+                    banner.textContent = `${account ? account.user : current.id} ${barcodeTypes[current.type]} 갱신 중`;
                     const card = document.getElementById(`card-${current.id}`);
                     if (!card || card.dataset.currentType !== current.type) return;
                     const img = card.querySelector(`img[data-id="${current.id}"]`);
@@ -320,9 +330,13 @@
                     clearTimeout(timeoutId);
                     if (response.status === 404 && options.cacheOnly) {
                         loader.classList.add('hidden');
-                        placeholder.classList.remove('hidden');
-                        placeholder.textContent = '자동 갱신 대기 중입니다';
-                        statusEl.textContent = '';
+                        if (!preserveDisplay) {
+                            placeholder.classList.remove('hidden');
+                            placeholder.textContent = '아직 저장된 바코드가 없습니다';
+                            statusEl.textContent = '순차 갱신 대기 중입니다.';
+                        } else {
+                            statusEl.textContent = '순차 갱신 대기 중입니다.';
+                        }
                         return;
                     }
                     if (response.status === 423) {
@@ -349,9 +363,11 @@
                         throw new Error('이미지 응답이 아닙니다');
                     }
                     const objectUrl = URL.createObjectURL(blob);
-                    const secondsLeft = parseInt(response.headers.get('X-Barcode-Seconds-Left') || '', 10) || BARCODE_VALID_TIME;
+                    const parsedSecondsLeft = parseInt(response.headers.get('X-Barcode-Seconds-Left') || '', 10);
+                    const secondsLeft = Number.isFinite(parsedSecondsLeft) ? parsedSecondsLeft : BARCODE_VALID_TIME;
                     const barcodeNumber = response.headers.get('X-Barcode-Number') || '';
                     const membershipGrade = response.headers.get('X-Membership-Grade') || '';
+                    const isStale = response.headers.get('X-Barcode-Stale') === '1';
                     if (barcodeType === 'general' && membershipGrade) {
                         card.dataset.generalGrade = membershipGrade;
                         updateBenefits(accountId, barcodeType);
@@ -369,13 +385,22 @@
                         URL.revokeObjectURL(img.dataset.objectUrl);
                     }
                     delete img.dataset.refreshQueued;
+                    img.dataset.stale = isStale ? '1' : '0';
                     img.dataset.objectUrl = objectUrl;
                     img.src = objectUrl;
                     img.classList.remove('hidden');
                     placeholder.classList.add('hidden');
                     loader.classList.add('hidden');
-                    statusEl.textContent = barcodeNumber ? `${barcodeTypes[barcodeType]}가 생성되었습니다. (${barcodeNumber})` : `${barcodeTypes[barcodeType]}가 생성되었습니다.`;
-                    startTimer(accountId, barcodeType, secondsLeft);
+                    if (isStale) {
+                        timerEl.textContent = '만료됨';
+                        statusEl.textContent = barcodeNumber
+                            ? `마지막 ${barcodeTypes[barcodeType]}를 표시 중입니다. 순차 갱신 대기 중입니다. (${barcodeNumber})`
+                            : `마지막 ${barcodeTypes[barcodeType]}를 표시 중입니다. 순차 갱신 대기 중입니다.`;
+                        runWarmWorker();
+                    } else {
+                        statusEl.textContent = barcodeNumber ? `${barcodeTypes[barcodeType]}가 생성되었습니다. (${barcodeNumber})` : `${barcodeTypes[barcodeType]}가 생성되었습니다.`;
+                        startTimer(accountId, barcodeType, secondsLeft);
+                    }
                 } catch (error) {
                     loader.classList.add('hidden');
                     if (!preserveDisplay) {
