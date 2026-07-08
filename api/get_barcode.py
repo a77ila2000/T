@@ -1,5 +1,5 @@
 from flask import Flask, request, Response
-import os, json, base64, io, time, re
+import os, json, base64, io, time, re, urllib.request, urllib.error
 from cryptography.fernet import Fernet
 from playwright.sync_api import sync_playwright
 
@@ -7,6 +7,8 @@ app = Flask(__name__)
 ENCRYPTION_KEY_B64 = os.environ.get("ENCRYPTION_KEY")
 ENCRYPTED_ACCOUNTS_B64 = os.environ.get("ENCRYPTED_ACCOUNTS")
 BROWSERLESS_TOKEN = os.environ.get("BROWSERLESS_TOKEN", "2Uq9iBy84O6QGwO008597820ed94cb8fb02789f1092d91545")
+UPSTASH_REDIS_REST_URL = os.environ.get("UPSTASH_REDIS_REST_URL", "").rstrip("/")
+UPSTASH_REDIS_REST_TOKEN = os.environ.get("UPSTASH_REDIS_REST_TOKEN", "")
 MY_PAGE_URL = "https://m.sktuniverse.co.kr/my"
 LOGIN_VIEW_URL = "https://m.sktuniverse.co.kr/member/login/view?loginRedirectUrl=%2Fmy"
 TID_AUTHORIZE_URL = "https://tapi.t-id.co.kr/oidc/v20/authorize?client_id=a1c144a9-6ab3-49f3-b03f-4ce80d257f16&redirect_uri=https%3A%2F%2Fm.sktuniverse.co.kr%2Fmember%2Flogin%2Fchannel/tid"
@@ -32,6 +34,62 @@ def decrypt_accounts():
     key = base64.urlsafe_b64decode(ENCRYPTION_KEY_B64)
     encrypted = base64.urlsafe_b64decode(ENCRYPTED_ACCOUNTS_B64)
     return json.loads(Fernet(key).decrypt(encrypted).decode("utf-8"))
+
+
+def redis_command(command, timeout=4):
+    if not UPSTASH_REDIS_REST_URL or not UPSTASH_REDIS_REST_TOKEN:
+        return None
+    req = urllib.request.Request(
+        UPSTASH_REDIS_REST_URL,
+        data=json.dumps(command).encode("utf-8"),
+        headers={
+            "Authorization": f"Bearer {UPSTASH_REDIS_REST_TOKEN}",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            payload = json.loads(resp.read().decode("utf-8"))
+            if payload.get("error"):
+                print(f"redis error: {payload.get('error')}", flush=True)
+                return None
+            return payload.get("result")
+    except Exception as exc:
+        print(f"redis command failed: {type(exc).__name__}: {exc}", flush=True)
+        return None
+
+
+def cache_key(account_id):
+    return f"barcode:{account_id}"
+
+
+def get_cached_barcode(account_id):
+    cached = BARCODE_CACHE.get(account_id)
+    now = time.time()
+    if cached and cached.get("expires_at", 0) > now + 5:
+        return cached
+
+    raw = redis_command(["GET", cache_key(account_id)])
+    if not raw:
+        return None
+    try:
+        value = json.loads(raw)
+        if value.get("expires_at", 0) <= now + 5:
+            return None
+        BARCODE_CACHE[account_id] = value
+        return value
+    except Exception as exc:
+        print(f"redis cache parse failed: {exc}", flush=True)
+        return None
+
+
+def set_cached_barcode(account_id, number, seconds_left):
+    ttl = max(1, int(seconds_left or 1200))
+    value = {"number": str(number), "expires_at": time.time() + ttl}
+    BARCODE_CACHE[account_id] = value
+    redis_command(["SET", cache_key(account_id), json.dumps(value), "EX", ttl])
+    return value
 
 
 def image_response(text, color=(255, 235, 238)):
@@ -279,8 +337,8 @@ def handler():
         target = next((acc for acc in accounts if acc["id"] == account_id), None)
         if not target:
             return f"Account not found: {account_id}", 404
-        cached = BARCODE_CACHE.get(account_id)
-        if not debug_mode and cached and cached.get("expires_at", 0) > time.time() + 5:
+        cached = get_cached_barcode(account_id)
+        if not debug_mode and cached:
             return barcode_response(cached["number"], int(cached["expires_at"] - time.time()))
         with sync_playwright() as p:
             stage = "connect_browserless"; mark(stage)
@@ -322,10 +380,7 @@ def handler():
             if debug_mode:
                 return diagnostic_response(page, context, account_id, f"{result}; barcode={barcode_result}; number={barcode_number}; seconds={seconds_left}", time.monotonic() - started)
             if barcode_number:
-                BARCODE_CACHE[account_id] = {
-                    "number": barcode_number,
-                    "expires_at": time.time() + max(1, int(seconds_left or 1200))
-                }
+                set_cached_barcode(account_id, barcode_number, seconds_left)
                 return barcode_response(barcode_number, seconds_left)
             return image_response(f"Barcode number not found\nID: {account_id}\nbarcode_result={barcode_result}\nurl={safe_url(page)}\nbody={get_body_text(page, 260)}"), 502
     except Exception as exc:
