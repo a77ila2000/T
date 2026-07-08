@@ -120,6 +120,11 @@
                 return `${accountId}:${barcodeType}`;
             }
 
+            function targetLabel(target) {
+                const account = accounts.find(item => item.id === target.id);
+                return `${account ? account.user : target.id} ${barcodeTypes[target.type] || target.type}`;
+            }
+
             function selectBarcodeType(accountId, barcodeType) {
                 const card = document.getElementById(`card-${accountId}`);
                 if (!card || card.dataset.currentType === barcodeType) return;
@@ -219,15 +224,14 @@
                     if (!current) {
                         const dueTargets = (status.targets || []).filter(target => Number(target.next_refresh_at || 0) <= status.now);
                         banner.textContent = dueTargets.length
-                            ? `자동 갱신 대기 ${dueTargets.length}개`
+                            ? `${targetLabel(dueTargets[0])}${dueTargets.length > 1 ? ` 외 ${dueTargets.length - 1}개` : ''} 갱신 필요 - 바로 시작합니다`
                             : '자동 갱신 대기 중인 바코드가 없습니다';
                         if (dueTargets.length && !warmWorkerRunning) {
-                            setTimeout(runWarmWorker, 1000);
+                            runWarmWorker();
                         }
                         return;
                     }
-                    const account = accounts.find(item => item.id === current.id);
-                    banner.textContent = `${account ? account.user : current.id} ${barcodeTypes[current.type]} 갱신 중`;
+                    banner.textContent = `${targetLabel(current)} 갱신 중`;
                     const card = document.getElementById(`card-${current.id}`);
                     if (!card || card.dataset.currentType !== current.type) return;
                     const img = card.querySelector(`img[data-id="${current.id}"]`);
@@ -253,7 +257,12 @@
                     const nextResponse = await fetch(`/api/warm_next?t=${Date.now()}`, { cache: 'no-store' });
                     if (!nextResponse.ok) return;
                     next = await nextResponse.json();
-                    if (next.status !== 'ok') return;
+                    if (next.status !== 'ok') {
+                        if (next.status === 'locked') {
+                            setTimeout(refreshWarmStatus, 1000);
+                        }
+                        return;
+                    }
                     refreshWarmStatus();
 
                     const response = await fetch(`/api/get_barcode?id=${next.id}&type=${next.type}&warm=1&t=${Date.now()}`, {
