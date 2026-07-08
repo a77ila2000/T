@@ -368,6 +368,17 @@ def wait_for_tid_result(page, timeout_ms=10000):
     return "timeout"
 
 
+def wait_for_tworld_result(page, timeout_ms=12000):
+    end = time.monotonic() + timeout_ms / 1000
+    while time.monotonic() < end:
+        if "m.tworld.co.kr" in safe_url(page):
+            page.wait_for_timeout(800)
+            return "callback"
+        time.sleep(0.2)
+    print(f"debug T world result wait timed out at url={safe_url(page)} body={get_body_text(page, 200)}", flush=True)
+    return "timeout"
+
+
 def open_tid_from_my(page):
     goto_page(page, MY_PAGE_URL, timeout=7000)
     page.wait_for_timeout(400)
@@ -424,6 +435,21 @@ def open_tworld_after_tid_login(page, target):
         goto_page(page, TWORLD_MY_URL, timeout=12000)
     page.wait_for_timeout(1200)
     wait_for_my_ready(page, 6000)
+
+
+def submit_tid_credentials(page, target, label=""):
+    prefix = f"{label} " if label else ""
+    print(prefix + "typed user selector:", type_first_visible(page, ["input#inputId", "input#userId", "input[name='userId']", "input[name='id']", "input[type='email']", "input[type='text']"], target["id"], 6000), flush=True)
+    print(prefix + "typed password selector:", type_first_visible(page, ["input#inputPassword", "input#password", "input[name='password']", "input[name='passwd']", "input[type='password']"], target["password"], 6000), flush=True)
+    try:
+        page.locator("button:has-text('Login'), input[type='submit'], button").last.click(force=True, timeout=2200)
+        print(prefix + "debug locator force click submit", flush=True)
+    except Exception as exc:
+        print(prefix + f"login button locator failed: {exc}", flush=True)
+    page.wait_for_timeout(200)
+    physical_tap_at(page, 206, 470)
+    page.wait_for_timeout(200)
+    force_submit(page)
 
 
 def open_barcode_view(page, deadline=None):
@@ -494,26 +520,23 @@ def handler():
             browser = p.chromium.connect_over_cdp(f"wss://chrome.browserless.io?token={BROWSERLESS_TOKEN}&stealth=true&timeout=60000", timeout=8000)
             context = browser.new_context(viewport={"width": 412, "height": 915}, user_agent=MOBILE_USER_AGENT, is_mobile=True, has_touch=True)
             page = context.new_page(); page.set_default_timeout(6000)
-            stage = "open_tid_from_my"; mark(stage)
-            open_tid_from_my(page)
-            wait_for_tid_login_form(page, 8000)
-            stage = "type_tid_credentials"; mark(stage)
-            print("typed user selector:", type_first_visible(page, ["input#inputId", "input#userId", "input[name='userId']", "input[name='id']", "input[type='email']", "input[type='text']"], target["id"], 6000), flush=True)
-            print("typed password selector:", type_first_visible(page, ["input#inputPassword", "input#password", "input[name='password']", "input[name='passwd']", "input[type='password']"], target["password"], 6000), flush=True)
-            stage = "submit_tid_login"; mark(stage)
-            try:
-                page.locator("button:has-text('Login'), input[type='submit'], button").last.click(force=True, timeout=2200)
-                print("debug locator force click submit", flush=True)
-            except Exception as exc:
-                print(f"login button locator failed: {exc}", flush=True)
-            page.wait_for_timeout(200); physical_tap_at(page, 206, 470); page.wait_for_timeout(200); force_submit(page)
-            result = wait_for_tid_result(page, 10000)
-            print(f"debug tid submit result={result} url={safe_url(page)}", flush=True)
-            if debug_mode and result == "timeout":
-                return diagnostic_response(page, context, account_id, result, time.monotonic() - started)
             if barcode_type == "general":
-                stage = "open_tworld_after_login"; mark(stage)
-                open_tworld_after_tid_login(page, target)
+                stage = "open_tworld_login"; mark(stage)
+                goto_page(page, TWORLD_LOGIN_URL, timeout=12000)
+                page.wait_for_timeout(900)
+                if "m.tworld.co.kr" not in safe_url(page):
+                    wait_for_tid_login_form(page, 10000)
+                    stage = "type_tworld_tid_credentials"; mark(stage)
+                    submit_tid_credentials(page, target, "tworld")
+                    result = wait_for_tworld_result(page, 12000)
+                else:
+                    result = "callback"
+                print(f"debug tworld login result={result} url={safe_url(page)}", flush=True)
+                if debug_mode and result == "timeout":
+                    return diagnostic_response(page, context, account_id, result, time.monotonic() - started)
+                stage = "open_tworld_my"; mark(stage)
+                goto_page(page, TWORLD_MY_URL, timeout=12000)
+                wait_for_my_ready(page, 6000)
                 print(f"debug final tworld url={safe_url(page)} body={get_body_text(page, 260)}", flush=True)
                 stage = "fetch_tworld_membership_data"; mark(stage)
                 barcode_api = fetch_tworld_membership_data(page)
@@ -525,6 +548,15 @@ def handler():
                     f"Tworld membership barcode not found\nID: {account_id}\nstate={barcode_api.get('membership_state')}\nresp={barcode_api.get('resp_code')}\nmessage={barcode_api.get('message') or barcode_api.get('raw')}"
                 ), 502
             else:
+                stage = "open_tid_from_my"; mark(stage)
+                open_tid_from_my(page)
+                wait_for_tid_login_form(page, 8000)
+                stage = "type_tid_credentials"; mark(stage)
+                submit_tid_credentials(page, target)
+                result = wait_for_tid_result(page, 10000)
+                print(f"debug tid submit result={result} url={safe_url(page)}", flush=True)
+                if debug_mode and result == "timeout":
+                    return diagnostic_response(page, context, account_id, result, time.monotonic() - started)
                 stage = "open_my_after_login"; mark(stage)
                 goto_page(page, MY_PAGE_URL, timeout=9000)
                 wait_for_my_ready(page, 5000)
