@@ -1,15 +1,15 @@
-name: Warm T Universe barcodes
+name: Warm T barcodes
 
 on:
   schedule:
-    - cron: '*/5 * * * *'
+    - cron: '*/3 * * * *'
   workflow_dispatch:
 
 permissions:
   contents: read
 
 concurrency:
-  group: warm-t-universe-barcodes
+  group: warm-t-barcodes
   cancel-in-progress: false
 
 jobs:
@@ -20,21 +20,33 @@ jobs:
       - name: Warm one barcode cache entry
         shell: bash
         run: |
-          ids=("a77ila2000" "a77ila10004" "min560728")
-          names=("me-universe" "mother-universe" "father-universe")
-          types=("universe" "universe" "universe")
+          next_json=$(curl --location --silent --show-error --max-time 20 \
+            "https://preedgaonprime.vercel.app/api/warm_next?t=$(date +%s%3N)" || echo '{"status":"request_failed"}')
+          echo "warm_next: ${next_json}"
 
-          slot=$(( ($(date +%s) / 300) % 3 ))
-          id="${ids[$slot]}"
-          name="${names[$slot]}"
-          type="${types[$slot]}"
+          status=$(python3 -c 'import json,sys; print(json.loads(sys.argv[1]).get("status",""))' "$next_json")
+          if [ "$status" != "ok" ]; then
+            echo "No warm target is due now."
+            exit 0
+          fi
+
+          id=$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["id"])' "$next_json")
+          type=$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["type"])' "$next_json")
+          name=$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["name"])' "$next_json")
+          token=$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["token"])' "$next_json")
           url="https://preedgaonprime.vercel.app/api/get_barcode?id=${id}&type=${type}&warm=1&t=$(date +%s%3N)"
 
           echo "Calling ${name} (${id})"
           http_code=$(curl --location --silent --show-error --max-time 75 \
-            --output "/tmp/barcode-${id}.png" \
+            --output "/tmp/barcode-${id}-${type}.png" \
             --write-out "%{http_code}" \
             "$url" || true)
-          bytes=$(wc -c < "/tmp/barcode-${id}.png" 2>/dev/null || echo 0)
+          bytes=$(wc -c < "/tmp/barcode-${id}-${type}.png" 2>/dev/null || echo 0)
           echo "${name}: HTTP $http_code, bytes=$bytes"
-          echo "Warmup finished. Individual failures are tolerated because T ID/T Universe may be slow."
+          success=0
+          if [ "$http_code" = "200" ] && [ "$bytes" -gt 1000 ]; then
+            success=1
+          fi
+          curl --location --silent --show-error --max-time 20 \
+            "https://preedgaonprime.vercel.app/api/warm_done?id=${id}&type=${type}&token=${token}&success=${success}&http_code=${http_code}&t=$(date +%s%3N)" || true
+          echo "Warmup finished. Next target is selected from Redis state every 3 minutes."

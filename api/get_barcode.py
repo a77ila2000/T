@@ -16,6 +16,16 @@ TWORLD_MY_URL = "https://m.tworld.co.kr/v6/my?returnUrl=https://m.tworld.co.kr/v
 TWORLD_LOGIN_URL = "https://m.tworld.co.kr/common/tid/login?target=/v6/my"
 MOBILE_USER_AGENT = "Mozilla/5.0 (Linux; Android 13; SM-G981B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Mobile Safari/537.36"
 BARCODE_CACHE = {}
+WARM_TARGETS = [
+    {"id": "a77ila2000", "type": "universe", "name": "me-universe"},
+    {"id": "a77ila10004", "type": "universe", "name": "mother-universe"},
+    {"id": "min560728", "type": "universe", "name": "father-universe"},
+    {"id": "a77ila2000", "type": "general", "name": "me-general"},
+    {"id": "a77ila10004", "type": "general", "name": "mother-general"},
+    {"id": "min560728", "type": "general", "name": "father-general"},
+]
+WARM_SUCCESS_INTERVAL = 20 * 60
+WARM_FAIL_INTERVAL = 3 * 60
 
 CODE128_PATTERNS = [
     "212222", "222122", "222221", "121223", "121322", "131222", "122213", "122312", "132212", "221213",
@@ -68,6 +78,14 @@ def normalize_barcode_type(value):
 
 def cache_key(account_id, barcode_type="universe"):
     return f"barcode:{normalize_barcode_type(barcode_type)}:{account_id}"
+
+
+def warm_state_key(account_id, barcode_type):
+    return f"barcode:warm:{normalize_barcode_type(barcode_type)}:{account_id}"
+
+
+def warm_lock_key():
+    return "barcode:warm-lock"
 
 
 def browser_lock_key():
@@ -123,7 +141,71 @@ def set_cached_barcode(account_id, number, seconds_left, barcode_type="universe"
     value = {"number": str(number), "expires_at": time.time() + ttl, "grade": str(grade or "")}
     BARCODE_CACHE[f"{barcode_type}:{account_id}"] = value
     redis_command(["SET", cache_key(account_id, barcode_type), json.dumps(value), "EX", ttl])
+    target = next((item for item in WARM_TARGETS if item["id"] == account_id and item["type"] == barcode_type), None)
+    if target:
+        now = int(time.time())
+        set_warm_state(target, {
+            "next_refresh_at": now + WARM_SUCCESS_INTERVAL,
+            "last_success_at": now,
+            "last_number": str(number),
+            "last_grade": str(grade or ""),
+        })
     return value
+
+
+def get_warm_state(target):
+    raw = redis_command(["GET", warm_state_key(target["id"], target["type"])])
+    if not raw:
+        return {}
+    try:
+        return json.loads(raw)
+    except Exception as exc:
+        print(f"warm state parse failed: {exc}", flush=True)
+        return {}
+
+
+def set_warm_state(target, state):
+    redis_command(["SET", warm_state_key(target["id"], target["type"]), json.dumps(state), "EX", 7 * 24 * 60 * 60])
+
+
+def select_warm_target(now=None):
+    now = int(now or time.time())
+    selected = None
+    selected_state = None
+    selected_due = None
+    for index, target in enumerate(WARM_TARGETS):
+        state = get_warm_state(target)
+        due_at = int(state.get("next_refresh_at") or 0)
+        if due_at > now:
+            continue
+        if selected is None or due_at < selected_due or (due_at == selected_due and index < selected.get("index", 0)):
+            selected = dict(target, index=index)
+            selected_state = state
+            selected_due = due_at
+    return selected, selected_state or {}
+
+
+def json_response(payload, status=200):
+    return Response(json.dumps(payload, ensure_ascii=False), status=status, mimetype="application/json")
+
+
+def acquire_warm_lock():
+    token = f"warm:{time.time()}"
+    result = redis_command(["SET", warm_lock_key(), token, "EX", 170, "NX"])
+    if result == "OK":
+        return token
+    return None
+
+
+def release_warm_lock(token):
+    if not token:
+        return
+    try:
+        current = redis_command(["GET", warm_lock_key()])
+        if current == token:
+            redis_command(["DEL", warm_lock_key()])
+    except Exception as exc:
+        print(f"warm lock release failed: {exc}", flush=True)
 
 
 def image_response(text, color=(255, 235, 238)):
@@ -554,6 +636,64 @@ def open_barcode_view(page, deadline=None):
         if extract_barcode_number(page) or safe_url(page) != before_url or get_body_text(page, 220) != before_text:
             return f"tap({x},{y})"
     return "not-opened"
+
+
+@app.route("/api/warm_next", methods=["GET"])
+def warm_next():
+    now = int(time.time())
+    lock_token = acquire_warm_lock()
+    if not lock_token:
+        return json_response({"status": "locked", "retry_after": 60})
+    target, state = select_warm_target(now)
+    if not target:
+        release_warm_lock(lock_token)
+        next_due = None
+        states = []
+        for item in WARM_TARGETS:
+            item_state = get_warm_state(item)
+            due_at = int(item_state.get("next_refresh_at") or 0)
+            if due_at:
+                states.append(due_at)
+        if states:
+            next_due = min(states)
+        return json_response({"status": "no_due", "now": now, "next_due_at": next_due})
+    return json_response({
+        "status": "ok",
+        "now": now,
+        "token": lock_token,
+        "id": target["id"],
+        "type": target["type"],
+        "name": target["name"],
+        "next_refresh_at": int(state.get("next_refresh_at") or 0),
+    })
+
+
+@app.route("/api/warm_done", methods=["GET", "POST"])
+def warm_done():
+    account_id = request.values.get("id")
+    barcode_type = normalize_barcode_type(request.values.get("type"))
+    token = request.values.get("token")
+    success = request.values.get("success") == "1"
+    http_code = request.values.get("http_code", "")
+    target = next((item for item in WARM_TARGETS if item["id"] == account_id and item["type"] == barcode_type), None)
+    if not target:
+        release_warm_lock(token)
+        return json_response({"status": "unknown_target"}, 404)
+    now = int(time.time())
+    existing = get_warm_state(target)
+    state = {
+        "next_refresh_at": now + (WARM_SUCCESS_INTERVAL if success else WARM_FAIL_INTERVAL),
+        "last_success_at": existing.get("last_success_at", 0),
+        "last_failure_at": existing.get("last_failure_at", 0),
+        "last_http_code": http_code,
+    }
+    if success:
+        state["last_success_at"] = now
+    else:
+        state["last_failure_at"] = now
+    set_warm_state(target, state)
+    release_warm_lock(token)
+    return json_response({"status": "recorded", "success": success, "next_refresh_at": state["next_refresh_at"]})
 
 
 @app.route("/api/get_barcode", methods=["GET"])
