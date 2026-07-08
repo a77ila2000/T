@@ -126,6 +126,11 @@ header h1 {
     margin-top: 0.5rem;
 }
 
+.status.active-refresh {
+    color: var(--primary-color);
+    font-weight: 700;
+}
+
 .benefit-box {
     margin-top: 1rem;
     padding: 0.85rem 1rem;

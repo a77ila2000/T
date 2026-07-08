@@ -65,6 +65,7 @@
             const CACHE_REFRESH_INTERVAL_MS = 30 * 1000;
             const refreshQueue = [];
             const queuedKeys = new Set();
+            const fetchingCards = new Set();
             let queueRunning = false;
             let warmWorkerRunning = false;
 
@@ -221,27 +222,52 @@
                     const status = await response.json();
                     const current = status.current;
                     const banner = document.getElementById('warm-status-banner');
+                    const dueTargets = (status.targets || [])
+                        .map((target, index) => ({ ...target, index }))
+                        .filter(target => Number(target.next_refresh_at || 0) <= status.now)
+                        .filter(target => !(current && current.id === target.id && current.type === target.type))
+                        .sort((a, b) => (a.next_refresh_at - b.next_refresh_at) || (a.index - b.index));
+
                     if (!current) {
-                        const dueTargets = (status.targets || []).filter(target => Number(target.next_refresh_at || 0) <= status.now);
                         banner.textContent = dueTargets.length
                             ? `${targetLabel(dueTargets[0])}${dueTargets.length > 1 ? ` 외 ${dueTargets.length - 1}개` : ''} 갱신 필요 - 바로 시작합니다`
                             : '자동 갱신 대기 중인 바코드가 없습니다';
                         if (dueTargets.length && !warmWorkerRunning) {
                             runWarmWorker();
                         }
-                        return;
+                    } else {
+                        banner.textContent = `${targetLabel(current)} 갱신 중`;
                     }
-                    banner.textContent = `${targetLabel(current)} 갱신 중`;
-                    const card = document.getElementById(`card-${current.id}`);
-                    if (!card || card.dataset.currentType !== current.type) return;
-                    const img = card.querySelector(`img[data-id="${current.id}"]`);
-                    const placeholder = card.querySelector('.barcode-placeholder');
-                    const statusEl = card.querySelector('.status');
-                    if (!img.dataset.objectUrl) {
+
+                    accounts.forEach(account => {
+                        if (fetchingCards.has(account.id)) return;
+                        const card = document.getElementById(`card-${account.id}`);
+                        if (!card) return;
+                        const barcodeType = card.dataset.currentType || 'universe';
+                        const img = card.querySelector(`img[data-id="${account.id}"]`);
+                        if (img.dataset.objectUrl) return;
+                        if (Number(img.dataset.retryUntil || 0) > Date.now()) return;
+
+                        const placeholder = card.querySelector('.barcode-placeholder');
+                        const statusEl = card.querySelector('.status');
+                        const loader = card.querySelector('.loader');
+                        const isActive = Boolean(current && current.id === account.id && current.type === barcodeType);
+                        const queuePosition = dueTargets.findIndex(target => target.id === account.id && target.type === barcodeType);
+
                         placeholder.classList.remove('hidden');
-                        placeholder.textContent = `${barcodeTypes[current.type]} 갱신 중입니다`;
-                    }
-                    statusEl.textContent = `${barcodeTypes[current.type]}를 순차 갱신 중입니다...`;
+                        statusEl.classList.toggle('active-refresh', isActive);
+                        if (isActive) {
+                            placeholder.textContent = `${barcodeTypes[barcodeType]} 갱신 중입니다`;
+                            loader.classList.remove('hidden');
+                            statusEl.textContent = `${barcodeTypes[barcodeType]}를 지금 갱신하고 있습니다...`;
+                        } else {
+                            loader.classList.add('hidden');
+                            placeholder.textContent = '자동 갱신 대기 중입니다';
+                            statusEl.textContent = queuePosition !== -1
+                                ? `대기열 ${queuePosition + 1}번째 - 순서를 기다리는 중입니다.`
+                                : '';
+                        }
+                    });
                 } catch (error) {
                     // Status display is best effort.
                 }
@@ -313,6 +339,9 @@
                     return;
                 }
 
+                fetchingCards.add(accountId);
+                delete img.dataset.retryUntil;
+
                 if (!preserveDisplay && img.dataset.timerId) {
                     clearInterval(parseInt(img.dataset.timerId));
                     delete img.dataset.timerId;
@@ -360,6 +389,7 @@
                             placeholder.textContent = '다른 바코드가 갱신 중입니다. 잠시 후 자동 재시도합니다.';
                         }
                         statusEl.textContent = `${retryAfter}초 후 다시 시도합니다.`;
+                        img.dataset.retryUntil = String(Date.now() + retryAfter * 1000);
                         setTimeout(() => enqueueBarcode(accountId, barcodeType, {
                             auto: options.auto,
                             manual: options.manual,
@@ -425,6 +455,7 @@
                     statusEl.textContent = error.name === 'AbortError' ? '요청 시간 초과' : String(error.message || error);
                 } finally {
                     buttons.forEach(button => button.disabled = false);
+                    fetchingCards.delete(accountId);
                 }
             }
 
