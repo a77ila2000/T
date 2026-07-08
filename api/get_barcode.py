@@ -710,17 +710,7 @@ def warm_next():
     })
 
 
-@app.route("/api/warm_done", methods=["GET", "POST"])
-def warm_done():
-    account_id = request.values.get("id")
-    barcode_type = normalize_barcode_type(request.values.get("type"))
-    token = request.values.get("token")
-    success = request.values.get("success") == "1"
-    http_code = request.values.get("http_code", "")
-    target = next((item for item in WARM_TARGETS if item["id"] == account_id and item["type"] == barcode_type), None)
-    if not target:
-        release_warm_lock(token)
-        return json_response({"status": "unknown_target"}, 404)
+def record_warm_result(target, token, success, http_code=""):
     now = int(time.time())
     existing = get_warm_state(target)
     if success:
@@ -741,7 +731,63 @@ def warm_done():
         }
     set_warm_state(target, state)
     release_warm_lock(token)
+    return state
+
+
+@app.route("/api/warm_done", methods=["GET", "POST"])
+def warm_done():
+    account_id = request.values.get("id")
+    barcode_type = normalize_barcode_type(request.values.get("type"))
+    token = request.values.get("token")
+    success = request.values.get("success") == "1"
+    http_code = request.values.get("http_code", "")
+    target = next((item for item in WARM_TARGETS if item["id"] == account_id and item["type"] == barcode_type), None)
+    if not target:
+        release_warm_lock(token)
+        return json_response({"status": "unknown_target"}, 404)
+    state = record_warm_result(target, token, success, http_code)
     return json_response({"status": "recorded", "success": success, "next_refresh_at": state["next_refresh_at"]})
+
+
+@app.route("/api/warm_tick", methods=["GET", "POST"])
+def warm_tick():
+    now = int(time.time())
+    lock_token = acquire_warm_lock()
+    if not lock_token:
+        return json_response({"status": "locked", "retry_after": 60})
+    target, _ = select_warm_target(now)
+    if not target:
+        release_warm_lock(lock_token)
+        return json_response({"status": "no_due", "now": now})
+    redis_command(["SET", warm_current_key(), json.dumps({
+        "token": lock_token,
+        "started_at": now,
+        "id": target["id"],
+        "type": target["type"],
+        "name": target["name"],
+    }), "EX", 180])
+    try:
+        result = perform_barcode_request(target["id"], target["type"])
+        if isinstance(result, tuple):
+            body, http_code = result[0], result[1]
+        else:
+            body, http_code = result, getattr(result, "status_code", 200)
+        content_type = getattr(body, "mimetype", "") or ""
+        success = http_code == 200 and content_type.startswith("image/")
+    except Exception as exc:
+        print(f"warm_tick failed for {target['id']}/{target['type']}: {type(exc).__name__}: {exc}", flush=True)
+        http_code = 500
+        success = False
+    state = record_warm_result(target, lock_token, success, str(http_code))
+    return json_response({
+        "status": "done",
+        "id": target["id"],
+        "type": target["type"],
+        "name": target["name"],
+        "success": success,
+        "http_code": http_code,
+        "next_refresh_at": state["next_refresh_at"],
+    })
 
 
 @app.route("/api/warm_status", methods=["GET"])
@@ -775,11 +821,15 @@ def warm_status():
 @app.route("/api/get_barcode", methods=["GET"])
 def handler():
     account_id = request.args.get("id")
+    if not account_id:
+        return "Account ID is required.", 400
     debug_mode = request.args.get("debug") == "1"
     cache_only = request.args.get("cache_only") == "1"
     barcode_type = normalize_barcode_type(request.args.get("type"))
-    if not account_id:
-        return "Account ID is required.", 400
+    return perform_barcode_request(account_id, barcode_type, debug_mode=debug_mode, cache_only=cache_only)
+
+
+def perform_barcode_request(account_id, barcode_type, debug_mode=False, cache_only=False):
     browser = None
     lock_token = None
     stage = "start"

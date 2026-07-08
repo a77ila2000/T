@@ -15,6 +15,10 @@
     {
       "source": "/api/warm_status",
       "destination": "/api/warm_status.py"
+    },
+    {
+      "source": "/api/warm_tick",
+      "destination": "/api/warm_tick.py"
     }
   ],
   "headers": [
@@ -40,6 +44,9 @@
     },
     "api/warm_status.py": {
       "maxDuration": 30
+    },
+    "api/warm_tick.py": {
+      "maxDuration": 60
     }
   }
 }
