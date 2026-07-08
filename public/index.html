@@ -117,6 +117,16 @@
             setInterval(refreshVisibleCaches, CACHE_REFRESH_INTERVAL_MS);
             setInterval(refreshWarmStatus, 15 * 1000);
 
+            function catchUpAfterHidden() {
+                if (document.hidden) return;
+                refreshVisibleCaches();
+                refreshWarmStatus();
+                runWarmWorker();
+            }
+            document.addEventListener('visibilitychange', catchUpAfterHidden);
+            window.addEventListener('pageshow', catchUpAfterHidden);
+            window.addEventListener('focus', catchUpAfterHidden);
+
             function queueKey(accountId, barcodeType) {
                 return `${accountId}:${barcodeType}`;
             }
