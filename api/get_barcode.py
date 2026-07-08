@@ -348,6 +348,7 @@ def open_barcode_view(page, deadline=None):
 def handler():
     account_id = request.args.get("id")
     debug_mode = request.args.get("debug") == "1"
+    cache_only = request.args.get("cache_only") == "1"
     if not account_id:
         return "Account ID is required.", 400
     browser = None
@@ -364,6 +365,8 @@ def handler():
         cached = get_cached_barcode(account_id)
         if not debug_mode and cached:
             return barcode_response(cached["number"], int(cached["expires_at"] - time.time()))
+        if cache_only:
+            return "No cached barcode", 404
         lock_token = acquire_browser_lock(account_id)
         if UPSTASH_REDIS_REST_URL and UPSTASH_REDIS_REST_TOKEN and not lock_token:
             cached = get_cached_barcode(account_id)
