@@ -17,24 +17,22 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 8
     steps:
-      - name: Warm barcode cache sequentially
+      - name: Warm one barcode cache entry
         shell: bash
         run: |
           ids=("a77ila2000" "a77ila10004" "min560728")
           names=("me" "mother" "father")
 
-          for idx in "${!ids[@]}"; do
-            id="${ids[$idx]}"
-            name="${names[$idx]}"
-            url="https://preedgaonprime.vercel.app/api/get_barcode?id=${id}&warm=1&t=$(date +%s%3N)"
-            echo "Calling ${name} (${id})"
-            http_code=$(curl --location --silent --show-error --max-time 75 \
-              --output "/tmp/barcode-${id}.png" \
-              --write-out "%{http_code}" \
-              "$url" || true)
-            bytes=$(wc -c < "/tmp/barcode-${id}.png" 2>/dev/null || echo 0)
-            echo "${name}: HTTP $http_code, bytes=$bytes"
-            sleep 2
-          done
+          slot=$(( ($(date +%s) / 600) % 3 ))
+          id="${ids[$slot]}"
+          name="${names[$slot]}"
+          url="https://preedgaonprime.vercel.app/api/get_barcode?id=${id}&warm=1&t=$(date +%s%3N)"
 
+          echo "Calling ${name} (${id})"
+          http_code=$(curl --location --silent --show-error --max-time 75 \
+            --output "/tmp/barcode-${id}.png" \
+            --write-out "%{http_code}" \
+            "$url" || true)
+          bytes=$(wc -c < "/tmp/barcode-${id}.png" 2>/dev/null || echo 0)
+          echo "${name}: HTTP $http_code, bytes=$bytes"
           echo "Warmup finished. Individual failures are tolerated because T ID/T Universe may be slow."

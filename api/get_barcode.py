@@ -385,7 +385,7 @@ def handler():
             return image_response(f"Barcode number not found\nID: {account_id}\nbarcode_result={barcode_result}\nurl={safe_url(page)}\nbody={get_body_text(page, 260)}"), 502
     except Exception as exc:
         print(f"Error processing {account_id} at {stage}: {type(exc).__name__}: {exc}", flush=True)
-        return image_response(f"Barcode failed\nID: {account_id}\n{stage}: {type(exc).__name__}: {exc}")
+        return image_response(f"Barcode failed\nID: {account_id}\n{stage}: {type(exc).__name__}: {exc}"), 502
     finally:
         if browser:
             try: browser.close()
