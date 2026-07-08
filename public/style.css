@@ -108,6 +108,46 @@ header h1 {
     margin-top: 0.5rem;
 }
 
+.benefit-box {
+    margin-top: 1rem;
+    padding: 0.85rem 1rem;
+    border-radius: 8px;
+    background-color: #fff7f7;
+    border: 1px solid #f5d6d7;
+}
+
+.benefit-title {
+    font-size: 0.9rem;
+    font-weight: 700;
+    color: var(--primary-color);
+    margin-bottom: 0.45rem;
+}
+
+.benefit-box ul {
+    list-style: none;
+    padding: 0;
+    margin: 0;
+}
+
+.benefit-box li {
+    position: relative;
+    padding-left: 0.9rem;
+    font-size: 0.92rem;
+    line-height: 1.55;
+    color: var(--text-color);
+}
+
+.benefit-box li::before {
+    content: "";
+    position: absolute;
+    left: 0;
+    top: 0.72em;
+    width: 0.35rem;
+    height: 0.35rem;
+    border-radius: 50%;
+    background-color: var(--primary-color);
+}
+
 .btn {
     background-color: var(--primary-color);
     color: white;

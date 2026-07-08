@@ -38,6 +38,21 @@
                 { user: "아버지", id: "min560728" }
             ];
 
+            const benefitsById = {
+                a77ila2000: [
+                    '파리바게뜨 30% 할인 / 월 3만원 한도'
+                ],
+                a77ila10004: [
+                    '세븐일레븐 30% 할인 / 월 3만원 한도',
+                    '투썸플레이스 30% 할인 / 월 3만원 한도',
+                    'CU 편의점 20% 할인 / 월 3만원 한도'
+                ],
+                min560728: [
+                    '파리바게뜨 30% 할인 / 월 3만원 한도',
+                    'CU 편의점 20% 할인 / 월 3만원 한도'
+                ]
+            };
+
             const cardContainer = document.getElementById('card-container');
             const BARCODE_VALID_TIME = 20 * 60;
             const INITIAL_STAGGER_MS = 10 * 60 * 1000;
@@ -49,6 +64,9 @@
                 const card = document.createElement('div');
                 card.className = 'card';
                 card.id = `card-${account.id}`;
+                const benefitItems = (benefitsById[account.id] || [])
+                    .map(benefit => `<li>${benefit}</li>`)
+                    .join('');
                 card.innerHTML = `
                     <div class="card-header">
                         <h2>${account.user}</h2>
@@ -62,6 +80,10 @@
                     <div class="card-footer">
                         <div class="timer"></div>
                         <div class="status"></div>
+                    </div>
+                    <div class="benefit-box">
+                        <div class="benefit-title">사용 가능 할인</div>
+                        <ul>${benefitItems}</ul>
                     </div>
                 `;
                 cardContainer.appendChild(card);
