@@ -205,6 +205,42 @@ def extract_seconds_left(page):
     return 20 * 60
 
 
+def fetch_barcode_data(page):
+    try:
+        result = page.evaluate("""
+        async () => {
+          const response = await fetch('/etc/barcode/data', {
+            method: 'GET',
+            credentials: 'include',
+            headers: {'Content-Type': 'application/json'}
+          });
+          const text = await response.text();
+          try {
+            return {ok: response.ok, status: response.status, body: JSON.parse(text)};
+          } catch (error) {
+            return {ok: response.ok, status: response.status, text};
+          }
+        }
+        """)
+        body = result.get("body") or {}
+        data = body.get("data") or {}
+        number = re.sub(r"\D", "", str(data.get("otbNum") or ""))
+        seconds_left = int(data.get("expireSeconds") or 20 * 60)
+        code = body.get("code") or ""
+        message = body.get("message") or body.get("errorMessage") or ""
+        return {
+            "status": result.get("status"),
+            "number": number,
+            "seconds_left": seconds_left,
+            "code": code,
+            "message": message,
+            "raw": str(body)[:500],
+        }
+    except Exception as exc:
+        print(f"debug barcode data api failed: {type(exc).__name__}: {exc}", flush=True)
+        return {"error": f"{type(exc).__name__}: {exc}"}
+
+
 def physical_tap_at(page, x, y):
     try: page.touchscreen.tap(x, y)
     except Exception as exc: print(f"touchscreen tap failed: {exc}", flush=True)
@@ -402,6 +438,20 @@ def handler():
             goto_page(page, MY_PAGE_URL, timeout=9000)
             wait_for_my_ready(page, 5000)
             print(f"debug final my url={safe_url(page)} body={get_body_text(page, 260)}", flush=True)
+            stage = "fetch_barcode_data"; mark(stage)
+            barcode_api = fetch_barcode_data(page)
+            print(f"debug barcode api={barcode_api}", flush=True)
+            if barcode_api.get("number"):
+                set_cached_barcode(account_id, barcode_api["number"], barcode_api.get("seconds_left", 20 * 60))
+                return barcode_response(barcode_api["number"], barcode_api.get("seconds_left", 20 * 60))
+            if barcode_api.get("code") in ["MSG0115", "MSG0116", "MSG0118", "MSG0120"]:
+                return image_response(
+                    f"T membership is required for barcode\nID: {account_id}\ncode={barcode_api.get('code')}\nmessage={barcode_api.get('message') or barcode_api.get('raw')}"
+                ), 409
+            if barcode_api.get("code") == "MSG0998":
+                return image_response(
+                    f"T membership card cancellation is in progress\nID: {account_id}\ncode={barcode_api.get('code')}\nmessage={barcode_api.get('message') or barcode_api.get('raw')}"
+                ), 409
             stage = "open_barcode_view"; mark(stage)
             if time.monotonic() - started > 52:
                 return image_response(f"Barcode timed out before opening view\nID: {account_id}\nelapsed={time.monotonic() - started:.1f}s"), 504
