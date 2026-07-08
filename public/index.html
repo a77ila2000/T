@@ -5,12 +5,6 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>T우주 가족 바코드</title>
     <link rel="stylesheet" href="style.css">
-    <style>
-        .btn:disabled {
-            opacity: 0.55;
-            cursor: wait;
-        }
-    </style>
 </head>
 <body>
     <div class="dashboard">
@@ -33,44 +27,58 @@
     <script>
         document.addEventListener('DOMContentLoaded', () => {
             const accounts = [
-                { user: "나", id: "a77ila2000" },
-                { user: "어머니", id: "a77ila10004" },
-                { user: "아버지", id: "min560728" }
+                { user: '나', id: 'a77ila2000' },
+                { user: '어머니', id: 'a77ila10004' },
+                { user: '아버지', id: 'min560728' }
             ];
 
-            const benefitsById = {
-                a77ila2000: [
-                    '파리바게뜨 30% 할인 / 월 3만원 한도'
-                ],
-                a77ila10004: [
-                    '세븐일레븐 30% 할인 / 월 3만원 한도',
-                    '투썸플레이스 30% 할인 / 월 3만원 한도',
-                    'CU 편의점 20% 할인 / 월 3만원 한도'
-                ],
-                min560728: [
-                    '파리바게뜨 30% 할인 / 월 3만원 한도',
-                    'CU 편의점 20% 할인 / 월 3만원 한도'
-                ]
+            const barcodeTypes = {
+                universe: '우주바코드',
+                general: '일반바코드'
+            };
+
+            const benefitsByType = {
+                universe: {
+                    a77ila2000: [
+                        '파리바게뜨 30% 할인 / 월 3만원 한도'
+                    ],
+                    a77ila10004: [
+                        '세븐일레븐 30% 할인 / 월 3만원 한도',
+                        '투썸플레이스 30% 할인 / 월 3만원 한도',
+                        'CU 편의점 20% 할인 / 월 3만원 한도'
+                    ],
+                    min560728: [
+                        '파리바게뜨 30% 할인 / 월 3만원 한도',
+                        'CU 편의점 20% 할인 / 월 3만원 한도'
+                    ]
+                },
+                general: {
+                    default: [
+                        'T멤버십 일반 바코드',
+                        'T멤버십 제휴처에서 할인 또는 적립 가능'
+                    ]
+                }
             };
 
             const cardContainer = document.getElementById('card-container');
             const BARCODE_VALID_TIME = 20 * 60;
             const INITIAL_STAGGER_MS = 10 * 60 * 1000;
             const refreshQueue = [];
-            const queuedIds = new Set();
+            const queuedKeys = new Set();
             let queueRunning = false;
 
             accounts.forEach(account => {
                 const card = document.createElement('div');
                 card.className = 'card';
                 card.id = `card-${account.id}`;
-                const benefitItems = (benefitsById[account.id] || [])
-                    .map(benefit => `<li>${benefit}</li>`)
-                    .join('');
+                card.dataset.currentType = 'universe';
                 card.innerHTML = `
                     <div class="card-header">
                         <h2>${account.user}</h2>
-                        <button class="btn" data-id="${account.id}">바코드 보기</button>
+                    </div>
+                    <div class="barcode-actions">
+                        <button class="btn type-btn active" data-id="${account.id}" data-type="universe">우주바코드</button>
+                        <button class="btn type-btn secondary" data-id="${account.id}" data-type="general">일반바코드</button>
                     </div>
                     <div class="barcode-container">
                         <div class="barcode-placeholder">자동 갱신 대기 중입니다</div>
@@ -83,29 +91,83 @@
                     </div>
                     <div class="benefit-box">
                         <div class="benefit-title">사용 가능 할인</div>
-                        <ul>${benefitItems}</ul>
+                        <ul class="benefit-list"></ul>
                     </div>
                 `;
                 cardContainer.appendChild(card);
+                updateBenefits(account.id, 'universe');
 
-                const button = card.querySelector('.btn');
-                button.addEventListener('click', () => enqueueBarcode(account.id, { manual: true, preserveDisplay: false }));
+                card.querySelectorAll('.type-btn').forEach(button => {
+                    button.addEventListener('click', () => {
+                        const barcodeType = button.dataset.type;
+                        selectBarcodeType(account.id, barcodeType);
+                        enqueueBarcode(account.id, barcodeType, { manual: true, preserveDisplay: false });
+                    });
+                });
             });
 
             accounts.forEach((account, index) => {
-                fetchBarcode(account.id, { cacheOnly: true, preserveDisplay: true, quietMiss: true });
-                setTimeout(() => enqueueBarcode(account.id, { auto: true, preserveDisplay: true }), index * INITIAL_STAGGER_MS);
+                fetchBarcode(account.id, 'universe', { cacheOnly: true, preserveDisplay: true, quietMiss: true });
+                setTimeout(() => enqueueBarcode(account.id, 'universe', { auto: true, preserveDisplay: true }), index * INITIAL_STAGGER_MS);
             });
 
-            function enqueueBarcode(accountId, options = {}) {
-                if (queuedIds.has(accountId)) {
+            function queueKey(accountId, barcodeType) {
+                return `${accountId}:${barcodeType}`;
+            }
+
+            function selectBarcodeType(accountId, barcodeType) {
+                const card = document.getElementById(`card-${accountId}`);
+                if (!card || card.dataset.currentType === barcodeType) return;
+                const img = card.querySelector(`img[data-id="${accountId}"]`);
+                const timerEl = card.querySelector('.timer');
+                const statusEl = card.querySelector('.status');
+                const placeholder = card.querySelector('.barcode-placeholder');
+                if (img.dataset.timerId) {
+                    clearInterval(parseInt(img.dataset.timerId));
+                    delete img.dataset.timerId;
+                }
+                if (img.dataset.objectUrl) {
+                    URL.revokeObjectURL(img.dataset.objectUrl);
+                    delete img.dataset.objectUrl;
+                }
+                delete img.dataset.refreshQueued;
+                img.classList.add('hidden');
+                placeholder.classList.remove('hidden');
+                placeholder.textContent = '자동 갱신 대기 중입니다';
+                timerEl.textContent = '';
+                statusEl.textContent = '';
+                card.dataset.currentType = barcodeType;
+                updateTypeButtons(accountId, barcodeType);
+                updateBenefits(accountId, barcodeType);
+                fetchBarcode(accountId, barcodeType, { cacheOnly: true, preserveDisplay: true, quietMiss: true });
+            }
+
+            function updateTypeButtons(accountId, barcodeType) {
+                const card = document.getElementById(`card-${accountId}`);
+                card.querySelectorAll('.type-btn').forEach(button => {
+                    const active = button.dataset.type === barcodeType;
+                    button.classList.toggle('active', active);
+                    button.classList.toggle('secondary', !active);
+                });
+            }
+
+            function updateBenefits(accountId, barcodeType) {
+                const card = document.getElementById(`card-${accountId}`);
+                const list = card.querySelector('.benefit-list');
+                const benefits = benefitsByType[barcodeType][accountId] || benefitsByType[barcodeType].default || [];
+                list.innerHTML = benefits.map(benefit => `<li>${benefit}</li>`).join('');
+            }
+
+            function enqueueBarcode(accountId, barcodeType, options = {}) {
+                const key = queueKey(accountId, barcodeType);
+                if (queuedKeys.has(key)) {
                     const card = document.getElementById(`card-${accountId}`);
                     const statusEl = card.querySelector('.status');
                     if (statusEl && options.manual) statusEl.textContent = '이미 갱신 대기 중입니다.';
                     return;
                 }
-                queuedIds.add(accountId);
-                refreshQueue.push({ accountId, options });
+                queuedKeys.add(key);
+                refreshQueue.push({ accountId, barcodeType, options });
                 processQueue();
             }
 
@@ -114,8 +176,8 @@
                 queueRunning = true;
                 while (refreshQueue.length) {
                     const job = refreshQueue.shift();
-                    queuedIds.delete(job.accountId);
-                    await fetchBarcode(job.accountId, job.options);
+                    queuedKeys.delete(queueKey(job.accountId, job.barcodeType));
+                    await fetchBarcode(job.accountId, job.barcodeType, job.options);
                     await delay(1500);
                 }
                 queueRunning = false;
@@ -125,15 +187,19 @@
                 return new Promise(resolve => setTimeout(resolve, ms));
             }
 
-            async function fetchBarcode(accountId, options = {}) {
+            async function fetchBarcode(accountId, barcodeType, options = {}) {
                 const card = document.getElementById(`card-${accountId}`);
                 const img = card.querySelector(`img[data-id="${accountId}"]`);
                 const loader = card.querySelector('.loader');
                 const placeholder = card.querySelector('.barcode-placeholder');
                 const timerEl = card.querySelector('.timer');
                 const statusEl = card.querySelector('.status');
-                const button = card.querySelector('.btn');
-                const preserveDisplay = Boolean(options.preserveDisplay && img.dataset.objectUrl);
+                const buttons = card.querySelectorAll('.type-btn');
+                const preserveDisplay = Boolean(options.preserveDisplay && img.dataset.objectUrl && card.dataset.currentType === barcodeType);
+
+                if (card.dataset.currentType !== barcodeType && !options.cacheOnly) {
+                    return;
+                }
 
                 if (!preserveDisplay && img.dataset.timerId) {
                     clearInterval(parseInt(img.dataset.timerId));
@@ -150,14 +216,14 @@
                     timerEl.textContent = '';
                 }
                 loader.classList.remove('hidden');
-                button.disabled = true;
-                statusEl.textContent = options.auto ? '자동 갱신 중입니다...' : '바코드를 실시간으로 생성 중입니다...';
+                buttons.forEach(button => button.disabled = true);
+                statusEl.textContent = options.auto ? `${barcodeTypes[barcodeType]} 자동 갱신 중입니다...` : `${barcodeTypes[barcodeType]}를 실시간으로 생성 중입니다...`;
 
                 try {
                     const controller = new AbortController();
                     const timeoutId = setTimeout(() => controller.abort(), 55000);
                     const cacheOnlyParam = options.cacheOnly ? '&cache_only=1' : '';
-                    const response = await fetch(`/api/get_barcode?id=${accountId}${cacheOnlyParam}&t=${Date.now()}`, {
+                    const response = await fetch(`/api/get_barcode?id=${accountId}&type=${barcodeType}${cacheOnlyParam}&t=${Date.now()}`, {
                         cache: 'no-store',
                         signal: controller.signal
                     });
@@ -178,7 +244,7 @@
                             placeholder.textContent = '다른 바코드가 갱신 중입니다. 잠시 후 자동 재시도합니다.';
                         }
                         statusEl.textContent = `${retryAfter}초 후 다시 시도합니다.`;
-                        setTimeout(() => enqueueBarcode(accountId, {
+                        setTimeout(() => enqueueBarcode(accountId, barcodeType, {
                             auto: options.auto,
                             manual: options.manual,
                             preserveDisplay: true
@@ -196,6 +262,10 @@
                     const secondsLeft = parseInt(response.headers.get('X-Barcode-Seconds-Left') || '', 10) || BARCODE_VALID_TIME;
                     const barcodeNumber = response.headers.get('X-Barcode-Number') || '';
 
+                    if (card.dataset.currentType !== barcodeType) {
+                        URL.revokeObjectURL(objectUrl);
+                        return;
+                    }
                     if (img.dataset.timerId) {
                         clearInterval(parseInt(img.dataset.timerId));
                         delete img.dataset.timerId;
@@ -209,8 +279,8 @@
                     img.classList.remove('hidden');
                     placeholder.classList.add('hidden');
                     loader.classList.add('hidden');
-                    statusEl.textContent = barcodeNumber ? `바코드가 생성되었습니다. (${barcodeNumber})` : '바코드가 생성되었습니다.';
-                    startTimer(accountId, secondsLeft);
+                    statusEl.textContent = barcodeNumber ? `${barcodeTypes[barcodeType]}가 생성되었습니다. (${barcodeNumber})` : `${barcodeTypes[barcodeType]}가 생성되었습니다.`;
+                    startTimer(accountId, barcodeType, secondsLeft);
                 } catch (error) {
                     loader.classList.add('hidden');
                     if (!preserveDisplay) {
@@ -222,11 +292,11 @@
                         : '오류가 발생했습니다. 다시 시도해주세요.';
                     statusEl.textContent = error.name === 'AbortError' ? '요청 시간 초과' : String(error.message || error);
                 } finally {
-                    button.disabled = false;
+                    buttons.forEach(button => button.disabled = false);
                 }
             }
 
-            function startTimer(accountId, duration) {
+            function startTimer(accountId, barcodeType, duration) {
                 const card = document.getElementById(`card-${accountId}`);
                 const img = card.querySelector(`img[data-id="${accountId}"]`);
                 const timerEl = card.querySelector('.timer');
@@ -235,6 +305,10 @@
                 let timeLeft = Math.max(1, duration);
 
                 const updateTimer = () => {
+                    if (card.dataset.currentType !== barcodeType) {
+                        clearInterval(timerId);
+                        return;
+                    }
                     const minutes = Math.floor(timeLeft / 60);
                     const seconds = timeLeft % 60;
                     timerEl.textContent = `남은 시간: ${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
@@ -245,7 +319,7 @@
                         if (img.dataset.refreshQueued !== '1') {
                             img.dataset.refreshQueued = '1';
                             statusEl.textContent = '20분이 지나 자동 갱신 중입니다.';
-                            enqueueBarcode(accountId, { auto: true, preserveDisplay: true });
+                            enqueueBarcode(accountId, barcodeType, { auto: true, preserveDisplay: true });
                         }
                     }
                 };

@@ -12,6 +12,8 @@ UPSTASH_REDIS_REST_TOKEN = os.environ.get("UPSTASH_REDIS_REST_TOKEN", "")
 MY_PAGE_URL = "https://m.sktuniverse.co.kr/my"
 LOGIN_VIEW_URL = "https://m.sktuniverse.co.kr/member/login/view?loginRedirectUrl=%2Fmy"
 TID_AUTHORIZE_URL = "https://tapi.t-id.co.kr/oidc/v20/authorize?client_id=a1c144a9-6ab3-49f3-b03f-4ce80d257f16&redirect_uri=https%3A%2F%2Fm.sktuniverse.co.kr%2Fmember%2Flogin%2Fchannel/tid"
+TWORLD_MY_URL = "https://m.tworld.co.kr/v6/my?returnUrl=https://m.tworld.co.kr/v6/main"
+TWORLD_LOGIN_URL = "https://m.tworld.co.kr/common/tid/login?target=/v6/my"
 MOBILE_USER_AGENT = "Mozilla/5.0 (Linux; Android 13; SM-G981B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Mobile Safari/537.36"
 BARCODE_CACHE = {}
 
@@ -60,8 +62,12 @@ def redis_command(command, timeout=4):
         return None
 
 
-def cache_key(account_id):
-    return f"barcode:{account_id}"
+def normalize_barcode_type(value):
+    return "general" if value in ("general", "normal", "tworld") else "universe"
+
+
+def cache_key(account_id, barcode_type="universe"):
+    return f"barcode:{normalize_barcode_type(barcode_type)}:{account_id}"
 
 
 def browser_lock_key():
@@ -87,31 +93,36 @@ def release_browser_lock(token):
         print(f"redis lock release failed: {exc}", flush=True)
 
 
-def get_cached_barcode(account_id):
-    cached = BARCODE_CACHE.get(account_id)
+def get_cached_barcode(account_id, barcode_type="universe"):
+    barcode_type = normalize_barcode_type(barcode_type)
+    memory_key = f"{barcode_type}:{account_id}"
+    cached = BARCODE_CACHE.get(memory_key)
     now = time.time()
     if cached and cached.get("expires_at", 0) > now + 5:
         return cached
 
-    raw = redis_command(["GET", cache_key(account_id)])
+    raw = redis_command(["GET", cache_key(account_id, barcode_type)])
+    if not raw and barcode_type == "universe":
+        raw = redis_command(["GET", f"barcode:{account_id}"])
     if not raw:
         return None
     try:
         value = json.loads(raw)
         if value.get("expires_at", 0) <= now + 5:
             return None
-        BARCODE_CACHE[account_id] = value
+        BARCODE_CACHE[memory_key] = value
         return value
     except Exception as exc:
         print(f"redis cache parse failed: {exc}", flush=True)
         return None
 
 
-def set_cached_barcode(account_id, number, seconds_left):
+def set_cached_barcode(account_id, number, seconds_left, barcode_type="universe"):
+    barcode_type = normalize_barcode_type(barcode_type)
     ttl = max(1, int(seconds_left or 1200))
     value = {"number": str(number), "expires_at": time.time() + ttl}
-    BARCODE_CACHE[account_id] = value
-    redis_command(["SET", cache_key(account_id), json.dumps(value), "EX", ttl])
+    BARCODE_CACHE[f"{barcode_type}:{account_id}"] = value
+    redis_command(["SET", cache_key(account_id, barcode_type), json.dumps(value), "EX", ttl])
     return value
 
 
@@ -241,6 +252,41 @@ def fetch_barcode_data(page):
         return {"error": f"{type(exc).__name__}: {exc}"}
 
 
+def fetch_tworld_membership_data(page):
+    try:
+        result = page.evaluate("""
+        async () => {
+          const response = await fetch('/common/my/tmembership', {
+            method: 'GET',
+            credentials: 'include',
+            headers: {'Content-Type': 'application/json'}
+          });
+          const text = await response.text();
+          try {
+            return {ok: response.ok, status: response.status, body: JSON.parse(text)};
+          } catch (error) {
+            return {ok: response.ok, status: response.status, text};
+          }
+        }
+        """)
+        body = result.get("body") or {}
+        data = body.get("data") or {}
+        number = re.sub(r"\D", "", str(data.get("otbNum") or data.get("barcode") or ""))
+        seconds_left = int(data.get("expireSeconds") or 20 * 60)
+        return {
+            "status": result.get("status"),
+            "resp_code": body.get("respCode"),
+            "number": number,
+            "seconds_left": seconds_left,
+            "membership_state": data.get("mbrStCd") or data.get("mbrTypCd") or data.get("displayType") or "",
+            "message": body.get("respMsg") or body.get("message") or "",
+            "raw": str(body)[:500],
+        }
+    except Exception as exc:
+        print(f"debug tworld membership api failed: {type(exc).__name__}: {exc}", flush=True)
+        return {"error": f"{type(exc).__name__}: {exc}"}
+
+
 def physical_tap_at(page, x, y):
     try: page.touchscreen.tap(x, y)
     except Exception as exc: print(f"touchscreen tap failed: {exc}", flush=True)
@@ -350,6 +396,36 @@ def wait_for_my_ready(page, timeout_ms=5000):
     return False
 
 
+def open_tworld_after_tid_login(page, target):
+    goto_page(page, TWORLD_LOGIN_URL, timeout=12000)
+    page.wait_for_timeout(1800)
+    if "auth.skt-id.co.kr" in safe_url(page):
+        try:
+            wait_for_tid_login_form(page, 2500)
+            print("debug tworld requested T ID login again", flush=True)
+            print("typed user selector:", type_first_visible(page, ["input#inputId", "input#userId", "input[name='userId']", "input[name='id']", "input[type='email']", "input[type='text']"], target["id"], 6000), flush=True)
+            print("typed password selector:", type_first_visible(page, ["input#inputPassword", "input#password", "input[name='password']", "input[name='passwd']", "input[type='password']"], target["password"], 6000), flush=True)
+            try:
+                page.locator("button:has-text('Login'), input[type='submit'], button").last.click(force=True, timeout=2200)
+            except Exception as exc:
+                print(f"tworld login button locator failed: {exc}", flush=True)
+            page.wait_for_timeout(200)
+            physical_tap_at(page, 206, 470)
+            page.wait_for_timeout(200)
+            force_submit(page)
+        except Exception as exc:
+            print(f"debug tworld T ID relogin skipped: {type(exc).__name__}: {exc}", flush=True)
+    end = time.monotonic() + 12
+    while time.monotonic() < end:
+        if "m.tworld.co.kr" in safe_url(page):
+            break
+        page.wait_for_timeout(300)
+    if "m.tworld.co.kr" not in safe_url(page):
+        goto_page(page, TWORLD_MY_URL, timeout=12000)
+    page.wait_for_timeout(1200)
+    wait_for_my_ready(page, 6000)
+
+
 def open_barcode_view(page, deadline=None):
     before_url = safe_url(page)
     before_text = get_body_text(page, 220)
@@ -385,6 +461,7 @@ def handler():
     account_id = request.args.get("id")
     debug_mode = request.args.get("debug") == "1"
     cache_only = request.args.get("cache_only") == "1"
+    barcode_type = normalize_barcode_type(request.args.get("type"))
     if not account_id:
         return "Account ID is required.", 400
     browser = None
@@ -398,14 +475,14 @@ def handler():
         target = next((acc for acc in accounts if acc["id"] == account_id), None)
         if not target:
             return f"Account not found: {account_id}", 404
-        cached = get_cached_barcode(account_id)
+        cached = get_cached_barcode(account_id, barcode_type)
         if not debug_mode and cached:
             return barcode_response(cached["number"], int(cached["expires_at"] - time.time()))
         if cache_only:
             return "No cached barcode", 404
         lock_token = acquire_browser_lock(account_id)
         if UPSTASH_REDIS_REST_URL and UPSTASH_REDIS_REST_TOKEN and not lock_token:
-            cached = get_cached_barcode(account_id)
+            cached = get_cached_barcode(account_id, barcode_type)
             if not debug_mode and cached:
                 return barcode_response(cached["number"], int(cached["expires_at"] - time.time()))
             resp = image_response(f"Another barcode refresh is already running\nID: {account_id}\nRetry shortly", color=(255, 248, 225))
@@ -434,24 +511,38 @@ def handler():
             print(f"debug tid submit result={result} url={safe_url(page)}", flush=True)
             if debug_mode and result == "timeout":
                 return diagnostic_response(page, context, account_id, result, time.monotonic() - started)
-            stage = "open_my_after_login"; mark(stage)
-            goto_page(page, MY_PAGE_URL, timeout=9000)
-            wait_for_my_ready(page, 5000)
-            print(f"debug final my url={safe_url(page)} body={get_body_text(page, 260)}", flush=True)
-            stage = "fetch_barcode_data"; mark(stage)
-            barcode_api = fetch_barcode_data(page)
-            print(f"debug barcode api={barcode_api}", flush=True)
-            if barcode_api.get("number"):
-                set_cached_barcode(account_id, barcode_api["number"], barcode_api.get("seconds_left", 20 * 60))
-                return barcode_response(barcode_api["number"], barcode_api.get("seconds_left", 20 * 60))
-            if barcode_api.get("code") in ["MSG0115", "MSG0116", "MSG0118", "MSG0120"]:
+            if barcode_type == "general":
+                stage = "open_tworld_after_login"; mark(stage)
+                open_tworld_after_tid_login(page, target)
+                print(f"debug final tworld url={safe_url(page)} body={get_body_text(page, 260)}", flush=True)
+                stage = "fetch_tworld_membership_data"; mark(stage)
+                barcode_api = fetch_tworld_membership_data(page)
+                print(f"debug tworld membership api={barcode_api}", flush=True)
+                if barcode_api.get("number"):
+                    set_cached_barcode(account_id, barcode_api["number"], barcode_api.get("seconds_left", 20 * 60), barcode_type)
+                    return barcode_response(barcode_api["number"], barcode_api.get("seconds_left", 20 * 60))
                 return image_response(
-                    f"T membership is required for barcode\nID: {account_id}\ncode={barcode_api.get('code')}\nmessage={barcode_api.get('message') or barcode_api.get('raw')}"
-                ), 409
-            if barcode_api.get("code") == "MSG0998":
-                return image_response(
-                    f"T membership card cancellation is in progress\nID: {account_id}\ncode={barcode_api.get('code')}\nmessage={barcode_api.get('message') or barcode_api.get('raw')}"
-                ), 409
+                    f"Tworld membership barcode not found\nID: {account_id}\nstate={barcode_api.get('membership_state')}\nresp={barcode_api.get('resp_code')}\nmessage={barcode_api.get('message') or barcode_api.get('raw')}"
+                ), 502
+            else:
+                stage = "open_my_after_login"; mark(stage)
+                goto_page(page, MY_PAGE_URL, timeout=9000)
+                wait_for_my_ready(page, 5000)
+                print(f"debug final my url={safe_url(page)} body={get_body_text(page, 260)}", flush=True)
+                stage = "fetch_barcode_data"; mark(stage)
+                barcode_api = fetch_barcode_data(page)
+                print(f"debug barcode api={barcode_api}", flush=True)
+                if barcode_api.get("number"):
+                    set_cached_barcode(account_id, barcode_api["number"], barcode_api.get("seconds_left", 20 * 60), barcode_type)
+                    return barcode_response(barcode_api["number"], barcode_api.get("seconds_left", 20 * 60))
+                if barcode_api.get("code") in ["MSG0115", "MSG0116", "MSG0118", "MSG0120"]:
+                    return image_response(
+                        f"T membership is required for barcode\nID: {account_id}\ncode={barcode_api.get('code')}\nmessage={barcode_api.get('message') or barcode_api.get('raw')}"
+                    ), 409
+                if barcode_api.get("code") == "MSG0998":
+                    return image_response(
+                        f"T membership card cancellation is in progress\nID: {account_id}\ncode={barcode_api.get('code')}\nmessage={barcode_api.get('message') or barcode_api.get('raw')}"
+                    ), 409
             stage = "open_barcode_view"; mark(stage)
             if time.monotonic() - started > 52:
                 return image_response(f"Barcode timed out before opening view\nID: {account_id}\nelapsed={time.monotonic() - started:.1f}s"), 504
