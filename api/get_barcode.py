@@ -375,6 +375,9 @@ def wait_for_tworld_result(page, timeout_ms=12000):
             page.wait_for_timeout(800)
             return "callback"
         time.sleep(0.2)
+    if "m.tworld.co.kr" in safe_url(page):
+        page.wait_for_timeout(800)
+        return "callback"
     print(f"debug T world result wait timed out at url={safe_url(page)} body={get_body_text(page, 200)}", flush=True)
     return "timeout"
 
@@ -544,6 +547,12 @@ def handler():
                 if barcode_api.get("number"):
                     set_cached_barcode(account_id, barcode_api["number"], barcode_api.get("seconds_left", 20 * 60), barcode_type)
                     return barcode_response(barcode_api["number"], barcode_api.get("seconds_left", 20 * 60))
+                visible_number = extract_barcode_number(page)
+                visible_seconds = extract_seconds_left(page)
+                print(f"debug tworld visible barcode number={visible_number} seconds={visible_seconds}", flush=True)
+                if visible_number:
+                    set_cached_barcode(account_id, visible_number, visible_seconds, barcode_type)
+                    return barcode_response(visible_number, visible_seconds)
                 return image_response(
                     f"Tworld membership barcode not found\nID: {account_id}\nstate={barcode_api.get('membership_state')}\nresp={barcode_api.get('resp_code')}\nmessage={barcode_api.get('message') or barcode_api.get('raw')}"
                 ), 502
