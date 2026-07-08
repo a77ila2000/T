@@ -149,16 +149,28 @@ def set_cached_barcode(account_id, number, seconds_left, barcode_type="universe"
         "created_at": time.time(),
     }
     BARCODE_CACHE[f"{barcode_type}:{account_id}"] = value
-    redis_command(["SET", cache_key(account_id, barcode_type), json.dumps(value), "EX", LAST_BARCODE_RETENTION])
+    write_result = redis_command(["SET", cache_key(account_id, barcode_type), json.dumps(value), "EX", LAST_BARCODE_RETENTION])
     target = next((item for item in WARM_TARGETS if item["id"] == account_id and item["type"] == barcode_type), None)
     if target:
         now = int(time.time())
-        set_warm_state(target, {
-            "next_refresh_at": now + WARM_SUCCESS_INTERVAL,
-            "last_success_at": now,
-            "last_number": str(number),
-            "last_grade": str(grade or ""),
-        })
+        existing = get_warm_state(target)
+        if write_result == "OK":
+            set_warm_state(target, {
+                "next_refresh_at": now + min(ttl, WARM_SUCCESS_INTERVAL),
+                "last_success_at": now,
+                "last_failure_at": existing.get("last_failure_at", 0),
+                "last_number": str(number),
+                "last_grade": str(grade or ""),
+            })
+        else:
+            print(f"redis SET failed for {cache_key(account_id, barcode_type)}; scheduling retry in {WARM_FAIL_INTERVAL}s", flush=True)
+            set_warm_state(target, {
+                "next_refresh_at": now + WARM_FAIL_INTERVAL,
+                "last_success_at": existing.get("last_success_at", 0),
+                "last_failure_at": now,
+                "last_number": existing.get("last_number", ""),
+                "last_grade": existing.get("last_grade", ""),
+            })
     return value
 
 
