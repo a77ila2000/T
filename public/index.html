@@ -221,6 +221,9 @@
                         banner.textContent = dueTargets.length
                             ? `자동 갱신 대기 ${dueTargets.length}개`
                             : '자동 갱신 대기 중인 바코드가 없습니다';
+                        if (dueTargets.length && !warmWorkerRunning) {
+                            setTimeout(runWarmWorker, 1000);
+                        }
                         return;
                     }
                     const account = accounts.find(item => item.id === current.id);
