@@ -334,8 +334,35 @@ def type_first_visible(page, selectors, value, timeout=6000):
     return locator.evaluate("e => e.id || e.name || e.type || e.tagName")
 
 
+def ensure_idpw_login_mode(page):
+    try:
+        if page.locator("input[type='password']").first.is_visible(timeout=500):
+            return
+    except Exception:
+        pass
+    try:
+        clicked = page.evaluate("""
+        () => {
+          const nodes = Array.from(document.querySelectorAll('button,a,[role=tab],[role=button],li,div,span'));
+          const target = nodes.find((el) => {
+            const text = (el.innerText || el.textContent || '').trim();
+            const r = el.getBoundingClientRect();
+            return /ID\\/?PW|아이디|비밀번호/i.test(text) && r.width > 20 && r.height > 10 && r.top < 260;
+          });
+          if (!target) return 'no-target';
+          target.click();
+          return (target.innerText || target.textContent || target.tagName || '').trim().slice(0, 80);
+        }
+        """)
+        print(f"debug idpw tab click target={clicked}", flush=True)
+        page.wait_for_timeout(600)
+    except Exception as exc:
+        print(f"debug idpw tab click failed: {exc}", flush=True)
+
+
 def wait_for_tid_login_form(page, timeout_ms=8000):
     end = time.monotonic() + timeout_ms / 1000
+    ensure_idpw_login_mode(page)
     while time.monotonic() < end:
         try:
             if page.locator("input#inputId, input#userId, input[type='text']").first.is_visible(timeout=400):
@@ -456,18 +483,29 @@ def open_tworld_after_tid_login(page, target):
 
 def submit_tid_credentials(page, target, label=""):
     prefix = f"{label} " if label else ""
+    ensure_idpw_login_mode(page)
     print(prefix + "typed user selector:", type_first_visible(page, ["input#inputId", "input#userId", "input[name='userId']", "input[name='id']", "input[type='email']", "input[type='text']"], target["id"], 6000), flush=True)
     print(prefix + "typed password selector:", type_first_visible(page, ["input#inputPassword", "input#password", "input[name='password']", "input[name='passwd']", "input[type='password']"], target["password"], 6000), flush=True)
     try:
+        page.locator("input[type='password']").first.press("Enter", timeout=1200)
+        print(prefix + "debug password enter submit", flush=True)
+    except Exception as exc:
+        print(prefix + f"debug password enter failed: {exc}", flush=True)
+    page.wait_for_timeout(700)
+    if "auth.skt-id.co.kr" not in safe_url(page):
+        return
+    try:
         clicked = page.evaluate("""
         () => {
+          const password = document.querySelector('input[type=password]');
+          const passBottom = password ? password.getBoundingClientRect().bottom : 300;
           const nodes = Array.from(document.querySelectorAll('button,input[type=submit],[role=button],a'));
           const visible = nodes.map((el) => {
             const r = el.getBoundingClientRect();
             const text = (el.innerText || el.value || el.getAttribute('aria-label') || '').trim();
             return {el, text, top:r.top, width:r.width, height:r.height, disabled:!!el.disabled};
-          }).filter((i) => i.width > 80 && i.height > 20 && !i.disabled);
-          const target = visible.find((i) => /로그인|login/i.test(i.text)) || visible.find((i) => i.top > 330);
+          }).filter((i) => i.width > 80 && i.height > 20 && i.top > passBottom && !i.disabled);
+          const target = visible.find((i) => /로그인|login/i.test(i.text)) || visible[0];
           if (!target) return 'no-target';
           target.el.click();
           return `${target.text}|${target.top}|${target.width}x${target.height}`;
@@ -549,7 +587,7 @@ def handler():
                 return barcode_response(cached["number"], int(cached["expires_at"] - time.time()), cached.get("grade", ""))
             resp = image_response(f"Another barcode refresh is already running\nID: {account_id}\nRetry shortly", color=(255, 248, 225))
             resp.status_code = 423
-            resp.headers["Retry-After"] = "20"
+            resp.headers["Retry-After"] = "75"
             return resp
         with sync_playwright() as p:
             stage = "connect_browserless"; mark(stage)
@@ -598,6 +636,11 @@ def handler():
                 stage = "type_tid_credentials"; mark(stage)
                 submit_tid_credentials(page, target)
                 result = wait_for_tid_result(page, 10000)
+                if result == "timeout" and "auth.skt-id.co.kr" in safe_url(page):
+                    stage = "retry_tid_idpw_login"; mark(stage)
+                    ensure_idpw_login_mode(page)
+                    submit_tid_credentials(page, target, "retry")
+                    result = wait_for_tid_result(page, 10000)
                 print(f"debug tid submit result={result} url={safe_url(page)}", flush=True)
                 if debug_mode and result == "timeout":
                     return diagnostic_response(page, context, account_id, result, time.monotonic() - started)
