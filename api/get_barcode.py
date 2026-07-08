@@ -117,10 +117,10 @@ def get_cached_barcode(account_id, barcode_type="universe"):
         return None
 
 
-def set_cached_barcode(account_id, number, seconds_left, barcode_type="universe"):
+def set_cached_barcode(account_id, number, seconds_left, barcode_type="universe", grade=""):
     barcode_type = normalize_barcode_type(barcode_type)
     ttl = max(1, int(seconds_left or 1200))
-    value = {"number": str(number), "expires_at": time.time() + ttl}
+    value = {"number": str(number), "expires_at": time.time() + ttl, "grade": str(grade or "")}
     BARCODE_CACHE[f"{barcode_type}:{account_id}"] = value
     redis_command(["SET", cache_key(account_id, barcode_type), json.dumps(value), "EX", ttl])
     return value
@@ -166,7 +166,7 @@ def screenshot_response(page):
     except Exception as exc: return image_response(f"screenshot failed: {exc}. url={safe_url(page)} body={get_body_text(page)}")
 
 
-def barcode_response(number, seconds_left=1200):
+def barcode_response(number, seconds_left=1200, grade=""):
     from PIL import Image, ImageDraw, ImageFont
     number = re.sub(r"\D", "", str(number))
     if not number:
@@ -194,6 +194,8 @@ def barcode_response(number, seconds_left=1200):
     resp.headers["Cache-Control"] = "no-store, max-age=0"
     resp.headers["X-Barcode-Number"] = number
     resp.headers["X-Barcode-Seconds-Left"] = str(max(1, int(seconds_left or 1200)))
+    if grade:
+        resp.headers["X-Membership-Grade"] = str(grade)
     return resp
 
 
@@ -214,6 +216,17 @@ def extract_seconds_left(page):
         minutes, seconds = matches[-1]
         return int(minutes) * 60 + int(seconds)
     return 20 * 60
+
+
+def extract_membership_grade(page):
+    try:
+        text = page.locator("body").inner_text(timeout=1500)
+    except Exception:
+        text = ""
+    for grade in ["VIP", "GOLD", "SILVER"]:
+        if re.search(rf"(?<![A-Z]){grade}(?![A-Z])", text, re.I):
+            return grade
+    return ""
 
 
 def fetch_barcode_data(page):
@@ -279,6 +292,7 @@ def fetch_tworld_membership_data(page):
             "number": number,
             "seconds_left": seconds_left,
             "membership_state": data.get("mbrStCd") or data.get("mbrTypCd") or data.get("displayType") or "",
+            "grade": data.get("grade") or data.get("gradeNm") or data.get("membershipGrade") or data.get("mbrGrdNm") or "",
             "message": body.get("respMsg") or body.get("message") or "",
             "raw": str(body)[:500],
         }
@@ -343,7 +357,7 @@ def force_submit(page):
             const text = (el.innerText || el.value || el.getAttribute('aria-label') || '').trim();
             return {el, text, top:r.top, width:r.width, height:r.height, disabled:!!el.disabled};
           }).filter((i) => i.width > 100 && i.height > 20 && i.top > 330 && !i.disabled);
-          const target = items.find((i) => /login/i.test(i.text)) || items[0];
+          const target = items.find((i) => /로그인|login/i.test(i.text)) || items[0];
           if (!target) return 'no-target';
           target.el.click();
           return `${target.text}|${target.top}|${target.width}x${target.height}`;
@@ -445,7 +459,26 @@ def submit_tid_credentials(page, target, label=""):
     print(prefix + "typed user selector:", type_first_visible(page, ["input#inputId", "input#userId", "input[name='userId']", "input[name='id']", "input[type='email']", "input[type='text']"], target["id"], 6000), flush=True)
     print(prefix + "typed password selector:", type_first_visible(page, ["input#inputPassword", "input#password", "input[name='password']", "input[name='passwd']", "input[type='password']"], target["password"], 6000), flush=True)
     try:
-        page.locator("button:has-text('Login'), input[type='submit'], button").last.click(force=True, timeout=2200)
+        clicked = page.evaluate("""
+        () => {
+          const nodes = Array.from(document.querySelectorAll('button,input[type=submit],[role=button],a'));
+          const visible = nodes.map((el) => {
+            const r = el.getBoundingClientRect();
+            const text = (el.innerText || el.value || el.getAttribute('aria-label') || '').trim();
+            return {el, text, top:r.top, width:r.width, height:r.height, disabled:!!el.disabled};
+          }).filter((i) => i.width > 80 && i.height > 20 && !i.disabled);
+          const target = visible.find((i) => /로그인|login/i.test(i.text)) || visible.find((i) => i.top > 330);
+          if (!target) return 'no-target';
+          target.el.click();
+          return `${target.text}|${target.top}|${target.width}x${target.height}`;
+        }
+        """)
+        print(prefix + f"debug dom login click target={clicked}", flush=True)
+    except Exception as exc:
+        print(prefix + f"debug dom login click failed: {exc}", flush=True)
+    page.wait_for_timeout(500)
+    try:
+        page.locator("button:has-text('로그인'), button:has-text('Login'), input[type='submit'], button").last.click(force=True, timeout=2200)
         print(prefix + "debug locator force click submit", flush=True)
     except Exception as exc:
         print(prefix + f"login button locator failed: {exc}", flush=True)
@@ -506,14 +539,14 @@ def handler():
             return f"Account not found: {account_id}", 404
         cached = get_cached_barcode(account_id, barcode_type)
         if not debug_mode and cached:
-            return barcode_response(cached["number"], int(cached["expires_at"] - time.time()))
+            return barcode_response(cached["number"], int(cached["expires_at"] - time.time()), cached.get("grade", ""))
         if cache_only:
             return "No cached barcode", 404
         lock_token = acquire_browser_lock(account_id)
         if UPSTASH_REDIS_REST_URL and UPSTASH_REDIS_REST_TOKEN and not lock_token:
             cached = get_cached_barcode(account_id, barcode_type)
             if not debug_mode and cached:
-                return barcode_response(cached["number"], int(cached["expires_at"] - time.time()))
+                return barcode_response(cached["number"], int(cached["expires_at"] - time.time()), cached.get("grade", ""))
             resp = image_response(f"Another barcode refresh is already running\nID: {account_id}\nRetry shortly", color=(255, 248, 225))
             resp.status_code = 423
             resp.headers["Retry-After"] = "20"
@@ -545,14 +578,16 @@ def handler():
                 barcode_api = fetch_tworld_membership_data(page)
                 print(f"debug tworld membership api={barcode_api}", flush=True)
                 if barcode_api.get("number"):
-                    set_cached_barcode(account_id, barcode_api["number"], barcode_api.get("seconds_left", 20 * 60), barcode_type)
-                    return barcode_response(barcode_api["number"], barcode_api.get("seconds_left", 20 * 60))
+                    grade = barcode_api.get("grade") or extract_membership_grade(page)
+                    set_cached_barcode(account_id, barcode_api["number"], barcode_api.get("seconds_left", 20 * 60), barcode_type, grade)
+                    return barcode_response(barcode_api["number"], barcode_api.get("seconds_left", 20 * 60), grade)
                 visible_number = extract_barcode_number(page)
                 visible_seconds = extract_seconds_left(page)
-                print(f"debug tworld visible barcode number={visible_number} seconds={visible_seconds}", flush=True)
+                visible_grade = extract_membership_grade(page)
+                print(f"debug tworld visible barcode number={visible_number} seconds={visible_seconds} grade={visible_grade}", flush=True)
                 if visible_number:
-                    set_cached_barcode(account_id, visible_number, visible_seconds, barcode_type)
-                    return barcode_response(visible_number, visible_seconds)
+                    set_cached_barcode(account_id, visible_number, visible_seconds, barcode_type, visible_grade)
+                    return barcode_response(visible_number, visible_seconds, visible_grade)
                 return image_response(
                     f"Tworld membership barcode not found\nID: {account_id}\nstate={barcode_api.get('membership_state')}\nresp={barcode_api.get('resp_code')}\nmessage={barcode_api.get('message') or barcode_api.get('raw')}"
                 ), 502

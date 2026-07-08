@@ -154,6 +154,11 @@
             function updateBenefits(accountId, barcodeType) {
                 const card = document.getElementById(`card-${accountId}`);
                 const list = card.querySelector('.benefit-list');
+                if (barcodeType === 'general') {
+                    const grade = card.dataset.generalGrade || '';
+                    list.innerHTML = `<li>T멤버십 등급: ${grade || '확인 중'}</li>`;
+                    return;
+                }
                 const benefits = benefitsByType[barcodeType][accountId] || benefitsByType[barcodeType].default || [];
                 list.innerHTML = benefits.map(benefit => `<li>${benefit}</li>`).join('');
             }
@@ -261,6 +266,11 @@
                     const objectUrl = URL.createObjectURL(blob);
                     const secondsLeft = parseInt(response.headers.get('X-Barcode-Seconds-Left') || '', 10) || BARCODE_VALID_TIME;
                     const barcodeNumber = response.headers.get('X-Barcode-Number') || '';
+                    const membershipGrade = response.headers.get('X-Membership-Grade') || '';
+                    if (barcodeType === 'general' && membershipGrade) {
+                        card.dataset.generalGrade = membershipGrade;
+                        updateBenefits(accountId, barcodeType);
+                    }
 
                     if (card.dataset.currentType !== barcodeType) {
                         URL.revokeObjectURL(objectUrl);
