@@ -138,6 +138,22 @@
                         signal: controller.signal
                     });
                     clearTimeout(timeoutId);
+                    if (response.status === 423) {
+                        const retryAfter = Math.max(10, parseInt(response.headers.get('Retry-After') || '20', 10));
+                        loader.classList.add('hidden');
+                        if (!preserveDisplay) {
+                            img.classList.add('hidden');
+                            placeholder.classList.remove('hidden');
+                            placeholder.textContent = '다른 바코드가 갱신 중입니다. 잠시 후 자동 재시도합니다.';
+                        }
+                        statusEl.textContent = `${retryAfter}초 후 다시 시도합니다.`;
+                        setTimeout(() => enqueueBarcode(accountId, {
+                            auto: options.auto,
+                            manual: options.manual,
+                            preserveDisplay: true
+                        }), retryAfter * 1000);
+                        return;
+                    }
                     if (!response.ok) {
                         throw new Error(`HTTP ${response.status}`);
                     }

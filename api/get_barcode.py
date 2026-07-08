@@ -64,6 +64,29 @@ def cache_key(account_id):
     return f"barcode:{account_id}"
 
 
+def browser_lock_key():
+    return "barcode:browserless-lock"
+
+
+def acquire_browser_lock(account_id):
+    token = f"{account_id}:{time.time()}"
+    result = redis_command(["SET", browser_lock_key(), token, "EX", 90, "NX"])
+    if result == "OK":
+        return token
+    return None
+
+
+def release_browser_lock(token):
+    if not token:
+        return
+    try:
+        current = redis_command(["GET", browser_lock_key()])
+        if current == token:
+            redis_command(["DEL", browser_lock_key()])
+    except Exception as exc:
+        print(f"redis lock release failed: {exc}", flush=True)
+
+
 def get_cached_barcode(account_id):
     cached = BARCODE_CACHE.get(account_id)
     now = time.time()
@@ -328,6 +351,7 @@ def handler():
     if not account_id:
         return "Account ID is required.", 400
     browser = None
+    lock_token = None
     stage = "start"
     started = time.monotonic()
     def mark(label): print(f"debug elapsed={time.monotonic() - started:.1f}s stage={label}", flush=True)
@@ -340,6 +364,15 @@ def handler():
         cached = get_cached_barcode(account_id)
         if not debug_mode and cached:
             return barcode_response(cached["number"], int(cached["expires_at"] - time.time()))
+        lock_token = acquire_browser_lock(account_id)
+        if UPSTASH_REDIS_REST_URL and UPSTASH_REDIS_REST_TOKEN and not lock_token:
+            cached = get_cached_barcode(account_id)
+            if not debug_mode and cached:
+                return barcode_response(cached["number"], int(cached["expires_at"] - time.time()))
+            resp = image_response(f"Another barcode refresh is already running\nID: {account_id}\nRetry shortly", color=(255, 248, 225))
+            resp.status_code = 423
+            resp.headers["Retry-After"] = "20"
+            return resp
         with sync_playwright() as p:
             stage = "connect_browserless"; mark(stage)
             browser = p.chromium.connect_over_cdp(f"wss://chrome.browserless.io?token={BROWSERLESS_TOKEN}&stealth=true&timeout=60000", timeout=8000)
@@ -387,6 +420,7 @@ def handler():
         print(f"Error processing {account_id} at {stage}: {type(exc).__name__}: {exc}", flush=True)
         return image_response(f"Barcode failed\nID: {account_id}\n{stage}: {type(exc).__name__}: {exc}"), 502
     finally:
+        release_browser_lock(lock_token)
         if browser:
             try: browser.close()
             except Exception: pass
