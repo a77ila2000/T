@@ -245,7 +245,7 @@
                         if (!card) return;
                         const barcodeType = card.dataset.currentType || 'universe';
                         const img = card.querySelector(`img[data-id="${account.id}"]`);
-                        if (img.dataset.objectUrl) return;
+                        if (img.dataset.objectUrl && img.dataset.stale !== '1') return;
                         if (Number(img.dataset.retryUntil || 0) > Date.now()) return;
 
                         const placeholder = card.querySelector('.barcode-placeholder');
@@ -253,9 +253,21 @@
                         const loader = card.querySelector('.loader');
                         const isActive = Boolean(current && current.id === account.id && current.type === barcodeType);
                         const queuePosition = dueTargets.findIndex(target => target.id === account.id && target.type === barcodeType);
+                        const showingStaleImage = Boolean(img.dataset.objectUrl && img.dataset.stale === '1');
+
+                        statusEl.classList.toggle('active-refresh', isActive);
+
+                        if (showingStaleImage) {
+                            // Keep the last successful barcode visible; only the status line changes.
+                            if (isActive) {
+                                statusEl.textContent = `${barcodeTypes[barcodeType]}를 지금 갱신하고 있습니다...`;
+                            } else if (queuePosition !== -1) {
+                                statusEl.textContent = `대기열 ${queuePosition + 1}번째 - 순서를 기다리는 중입니다.`;
+                            }
+                            return;
+                        }
 
                         placeholder.classList.remove('hidden');
-                        statusEl.classList.toggle('active-refresh', isActive);
                         if (isActive) {
                             placeholder.textContent = `${barcodeTypes[barcodeType]} 갱신 중입니다`;
                             loader.classList.remove('hidden');
