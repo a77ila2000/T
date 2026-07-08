@@ -2,7 +2,7 @@ name: Warm T Universe barcodes
 
 on:
   schedule:
-    - cron: '*/10 * * * *'
+    - cron: '*/5 * * * *'
   workflow_dispatch:
 
 permissions:
@@ -20,11 +20,11 @@ jobs:
       - name: Warm one barcode cache entry
         shell: bash
         run: |
-          ids=("a77ila2000" "a77ila10004" "min560728" "a77ila2000" "a77ila10004" "min560728")
-          names=("me-universe" "mother-universe" "father-universe" "me-general" "mother-general" "father-general")
-          types=("universe" "universe" "universe" "general" "general" "general")
+          ids=("a77ila2000" "a77ila10004" "min560728")
+          names=("me-universe" "mother-universe" "father-universe")
+          types=("universe" "universe" "universe")
 
-          slot=$(( ($(date +%s) / 600) % 6 ))
+          slot=$(( ($(date +%s) / 300) % 3 ))
           id="${ids[$slot]}"
           name="${names[$slot]}"
           type="${types[$slot]}"
