@@ -61,6 +61,7 @@
             const cardContainer = document.getElementById('card-container');
             const BARCODE_VALID_TIME = 20 * 60;
             const CLIENT_WARM_INTERVAL_MS = 3 * 60 * 1000;
+            const CACHE_REFRESH_INTERVAL_MS = 30 * 1000;
             const refreshQueue = [];
             const queuedKeys = new Set();
             let queueRunning = false;
@@ -108,7 +109,11 @@
                 fetchBarcode(account.id, 'universe', { cacheOnly: true, preserveDisplay: true, quietMiss: true });
             });
             runWarmWorker();
+            refreshVisibleCaches();
+            refreshWarmStatus();
             setInterval(runWarmWorker, CLIENT_WARM_INTERVAL_MS);
+            setInterval(refreshVisibleCaches, CACHE_REFRESH_INTERVAL_MS);
+            setInterval(refreshWarmStatus, 15 * 1000);
 
             function queueKey(accountId, barcodeType) {
                 return `${accountId}:${barcodeType}`;
@@ -191,6 +196,40 @@
                 return new Promise(resolve => setTimeout(resolve, ms));
             }
 
+            function refreshVisibleCaches() {
+                accounts.forEach(account => {
+                    const card = document.getElementById(`card-${account.id}`);
+                    if (!card) return;
+                    fetchBarcode(account.id, card.dataset.currentType || 'universe', {
+                        cacheOnly: true,
+                        preserveDisplay: true,
+                        quietMiss: true
+                    });
+                });
+            }
+
+            async function refreshWarmStatus() {
+                try {
+                    const response = await fetch(`/api/warm_status?t=${Date.now()}`, { cache: 'no-store' });
+                    if (!response.ok) return;
+                    const status = await response.json();
+                    const current = status.current;
+                    if (!current) return;
+                    const card = document.getElementById(`card-${current.id}`);
+                    if (!card || card.dataset.currentType !== current.type) return;
+                    const img = card.querySelector(`img[data-id="${current.id}"]`);
+                    const placeholder = card.querySelector('.barcode-placeholder');
+                    const statusEl = card.querySelector('.status');
+                    if (!img.dataset.objectUrl) {
+                        placeholder.classList.remove('hidden');
+                        placeholder.textContent = `${barcodeTypes[current.type]} 갱신 중입니다`;
+                    }
+                    statusEl.textContent = `${barcodeTypes[current.type]}를 순차 갱신 중입니다...`;
+                } catch (error) {
+                    // Status display is best effort.
+                }
+            }
+
             async function runWarmWorker() {
                 if (warmWorkerRunning) return;
                 warmWorkerRunning = true;
@@ -202,6 +241,7 @@
                     if (!nextResponse.ok) return;
                     next = await nextResponse.json();
                     if (next.status !== 'ok') return;
+                    refreshWarmStatus();
 
                     const response = await fetch(`/api/get_barcode?id=${next.id}&type=${next.type}&warm=1&t=${Date.now()}`, {
                         cache: 'no-store'

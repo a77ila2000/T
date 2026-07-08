@@ -88,6 +88,10 @@ def warm_lock_key():
     return "barcode:warm-lock"
 
 
+def warm_current_key():
+    return "barcode:warm-current"
+
+
 def browser_lock_key():
     return "barcode:browserless-lock"
 
@@ -204,6 +208,7 @@ def release_warm_lock(token):
         current = redis_command(["GET", warm_lock_key()])
         if current == token:
             redis_command(["DEL", warm_lock_key()])
+            redis_command(["DEL", warm_current_key()])
     except Exception as exc:
         print(f"warm lock release failed: {exc}", flush=True)
 
@@ -657,6 +662,13 @@ def warm_next():
         if states:
             next_due = min(states)
         return json_response({"status": "no_due", "now": now, "next_due_at": next_due})
+    redis_command(["SET", warm_current_key(), json.dumps({
+        "token": lock_token,
+        "started_at": now,
+        "id": target["id"],
+        "type": target["type"],
+        "name": target["name"],
+    }), "EX", 180])
     return json_response({
         "status": "ok",
         "now": now,
@@ -694,6 +706,33 @@ def warm_done():
     set_warm_state(target, state)
     release_warm_lock(token)
     return json_response({"status": "recorded", "success": success, "next_refresh_at": state["next_refresh_at"]})
+
+
+@app.route("/api/warm_status", methods=["GET"])
+def warm_status():
+    now = int(time.time())
+    current_raw = redis_command(["GET", warm_current_key()])
+    current = None
+    if current_raw:
+        try:
+            current = json.loads(current_raw)
+        except Exception:
+            current = None
+    targets = []
+    for item in WARM_TARGETS:
+        state = get_warm_state(item)
+        cached = get_cached_barcode(item["id"], item["type"])
+        targets.append({
+            "id": item["id"],
+            "type": item["type"],
+            "name": item["name"],
+            "next_refresh_at": int(state.get("next_refresh_at") or 0),
+            "last_success_at": int(state.get("last_success_at") or 0),
+            "last_failure_at": int(state.get("last_failure_at") or 0),
+            "has_cache": bool(cached),
+            "seconds_left": int(cached["expires_at"] - time.time()) if cached else 0,
+        })
+    return json_response({"status": "ok", "now": now, "current": current, "targets": targets})
 
 
 @app.route("/api/get_barcode", methods=["GET"])

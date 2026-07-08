@@ -11,6 +11,10 @@
     {
       "source": "/api/warm_done",
       "destination": "/api/warm_done.py"
+    },
+    {
+      "source": "/api/warm_status",
+      "destination": "/api/warm_status.py"
     }
   ],
   "headers": [
@@ -32,6 +36,9 @@
       "maxDuration": 30
     },
     "api/warm_done.py": {
+      "maxDuration": 30
+    },
+    "api/warm_status.py": {
       "maxDuration": 30
     }
   }
