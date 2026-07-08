@@ -119,14 +119,7 @@ def release_browser_lock(token):
 def get_cached_barcode(account_id, barcode_type="universe", allow_stale=False):
     barcode_type = normalize_barcode_type(barcode_type)
     memory_key = f"{barcode_type}:{account_id}"
-    cached = BARCODE_CACHE.get(memory_key)
     now = time.time()
-    if cached:
-        cached = dict(cached)
-        cached["seconds_left"] = max(0, int(cached.get("expires_at", 0) - now))
-        cached["stale"] = cached.get("expires_at", 0) <= now + 5
-        if allow_stale or not cached["stale"]:
-            return cached
 
     raw = redis_command(["GET", cache_key(account_id, barcode_type)])
     if not raw and barcode_type == "universe":
