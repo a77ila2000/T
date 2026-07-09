@@ -35,9 +35,14 @@ WARM_CURRENT_TTL = 90
 LAST_BARCODE_RETENTION = 7 * 24 * 60 * 60
 # Vercel Runtime Timeout Error logs showed /api/warm_tick hitting the platform's own 60s
 # maxDuration and getting killed outright - which skips our except/finally entirely, so
-# release_browser_lock() and record_warm_result() never run. Raise our own timeout a few
-# seconds earlier so a slow scrape always fails through normal Python control flow instead.
-SCRAPE_BUDGET_SECONDS = 50
+# release_browser_lock() and record_warm_result() never run. Checked between every stage
+# transition (see mark() below) rather than relying on signal.alarm alone, since Vercel
+# kept hitting its own 60s kill even with the alarm armed - most likely because the Python
+# runtime here doesn't execute request handling on the main thread, where signal.alarm is a
+# silent no-op. Kept well under 60s: a single retry-driven step between checkpoints can run
+# up to ~25s on its own, so this needs enough headroom that one more such step still lands
+# safely under the platform limit once caught at the next checkpoint.
+SCRAPE_BUDGET_SECONDS = 35
 
 
 class ScrapeTimeout(Exception):
@@ -886,7 +891,17 @@ def perform_barcode_request(account_id, barcode_type, debug_mode=False, cache_on
     lock_token = None
     stage = "start"
     started = time.monotonic()
-    def mark(label): print(f"debug elapsed={time.monotonic() - started:.1f}s stage={label}", flush=True)
+    def mark(label):
+        elapsed = time.monotonic() - started
+        print(f"debug elapsed={elapsed:.1f}s stage={label}", flush=True)
+        # signal.alarm is the belt; this is the suspenders. Vercel logs showed the alarm
+        # alone wasn't enough to avoid the platform's own 60s kill (likely because the
+        # Python runtime here doesn't run request handling on the main thread, where
+        # signal.alarm silently has no effect) - so every stage transition also checks
+        # elapsed wall-clock time directly and bails out via normal Python control flow,
+        # which works regardless of threading/signal semantics.
+        if elapsed > SCRAPE_BUDGET_SECONDS:
+            raise ScrapeTimeout(f"scrape exceeded {SCRAPE_BUDGET_SECONDS}s internal budget at stage={label}")
     has_alarm = False
     if hasattr(signal, "alarm"):
         try:
@@ -939,6 +954,7 @@ def perform_barcode_request(account_id, barcode_type, debug_mode=False, cache_on
                         ensure_idpw_login_mode(page)
                         submit_tid_credentials(page, target, "tworld-retry")
                         result = wait_for_tworld_result(page, 12000)
+                        mark("after_retry_tworld_idpw_login")
                 else:
                     result = "callback"
                 print(f"debug tworld login result={result} url={safe_url(page)}", flush=True)
@@ -977,6 +993,7 @@ def perform_barcode_request(account_id, barcode_type, debug_mode=False, cache_on
                     ensure_idpw_login_mode(page)
                     submit_tid_credentials(page, target, "retry")
                     result = wait_for_tid_result(page, 10000)
+                    mark("after_retry_tid_idpw_login")
                 print(f"debug tid submit result={result} url={safe_url(page)}", flush=True)
                 if debug_mode and result == "timeout":
                     return diagnostic_response(page, context, account_id, result, time.monotonic() - started)
