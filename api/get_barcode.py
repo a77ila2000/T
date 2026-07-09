@@ -159,6 +159,16 @@ def get_cached_barcode(account_id, barcode_type="universe", allow_stale=False):
         return None
 
 
+def compute_failure_retry_delay(existing):
+    # First failure after a success (or a fresh target) retries immediately so it doesn't
+    # lose its place behind targets on the normal ~20 minute cycle. A second consecutive
+    # failure falls back to the normal cool-down so a genuinely broken target doesn't
+    # hot-loop and starve everything else of the single shared browser session.
+    consecutive_failures = int(existing.get("consecutive_failures", 0)) + 1
+    delay = 0 if consecutive_failures == 1 else WARM_FAIL_INTERVAL
+    return delay, consecutive_failures
+
+
 def set_cached_barcode(account_id, number, seconds_left, barcode_type="universe", grade=""):
     barcode_type = normalize_barcode_type(barcode_type)
     ttl = max(1, int(seconds_left or 1200))
@@ -193,13 +203,15 @@ def set_cached_barcode(account_id, number, seconds_left, barcode_type="universe"
                 "last_grade": str(grade or ""),
             })
         else:
-            print(f"redis SET failed for {cache_key(account_id, barcode_type)}; scheduling retry in {WARM_FAIL_INTERVAL}s", flush=True)
+            delay, consecutive_failures = compute_failure_retry_delay(existing)
+            print(f"redis SET failed for {cache_key(account_id, barcode_type)}; scheduling retry in {delay}s (consecutive_failures={consecutive_failures})", flush=True)
             set_warm_state(target, {
-                "next_refresh_at": now + WARM_FAIL_INTERVAL,
+                "next_refresh_at": now + delay,
                 "last_success_at": existing.get("last_success_at", 0),
                 "last_failure_at": now,
                 "last_number": existing.get("last_number", ""),
                 "last_grade": existing.get("last_grade", ""),
+                "consecutive_failures": consecutive_failures,
             })
     return value
 
@@ -740,12 +752,14 @@ def record_warm_result(target, token, success, http_code=""):
         state.setdefault("next_refresh_at", now + WARM_SUCCESS_INTERVAL)
         state["last_http_code"] = http_code
     else:
+        delay, consecutive_failures = compute_failure_retry_delay(existing)
         state = {
-            "next_refresh_at": now + WARM_FAIL_INTERVAL,
+            "next_refresh_at": now + delay,
             "last_success_at": existing.get("last_success_at", 0),
             "last_failure_at": now,
             "last_number": existing.get("last_number", ""),
             "last_grade": existing.get("last_grade", ""),
+            "consecutive_failures": consecutive_failures,
             "last_http_code": http_code,
         }
     set_warm_state(target, state)
