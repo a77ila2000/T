@@ -854,10 +854,14 @@ def perform_barcode_request(account_id, barcode_type, debug_mode=False, cache_on
     stage = "start"
     started = time.monotonic()
     def mark(label): print(f"debug elapsed={time.monotonic() - started:.1f}s stage={label}", flush=True)
-    has_alarm = hasattr(signal, "alarm")
-    if has_alarm:
-        signal.signal(signal.SIGALRM, _scrape_alarm_handler)
-        signal.alarm(SCRAPE_BUDGET_SECONDS)
+    has_alarm = False
+    if hasattr(signal, "alarm"):
+        try:
+            signal.signal(signal.SIGALRM, _scrape_alarm_handler)
+            signal.alarm(SCRAPE_BUDGET_SECONDS)
+            has_alarm = True
+        except Exception as exc:
+            print(f"debug scrape alarm unavailable: {type(exc).__name__}: {exc}", flush=True)
     try:
         stage = "decrypt_accounts"; mark(stage)
         accounts = decrypt_accounts()
