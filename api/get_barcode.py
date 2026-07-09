@@ -27,6 +27,10 @@ WARM_TARGETS = [
 WARM_SUCCESS_INTERVAL = 20 * 60
 WARM_FAIL_INTERVAL = 30
 WARM_STAGGER_INTERVAL = 3 * 60
+# Only pull a schedule earlier for sibling separation when it's already due soon - otherwise
+# a barcode with plenty of real validity left gets force-refreshed early just to dodge a
+# sibling collision that's still many minutes away and may not even matter by then.
+WARM_STAGGER_APPLY_WINDOW = 5 * 60
 # Must stay close to get_barcode.py/warm_tick.py's vercel.json maxDuration (60s): if Vercel
 # kills a scrape for running too long, nothing releases the lock, so it can only self-heal
 # once its TTL expires. A lock TTL far beyond maxDuration (the old value was 170s) means a
@@ -189,12 +193,15 @@ def set_cached_barcode(account_id, number, seconds_left, barcode_type="universe"
             next_refresh_at = now + min(ttl, WARM_SUCCESS_INTERVAL)
             sibling_type = "general" if barcode_type == "universe" else "universe"
             sibling = next((item for item in WARM_TARGETS if item["id"] == account_id and item["type"] == sibling_type), None)
-            if sibling:
+            if sibling and next_refresh_at - now <= WARM_STAGGER_APPLY_WINDOW:
                 sibling_next = int(get_warm_state(sibling).get("next_refresh_at") or 0)
                 if sibling_next and abs(next_refresh_at - sibling_next) < WARM_STAGGER_INTERVAL:
                     # Only ever pull the schedule earlier for separation, never push it later -
                     # delaying past this barcode's own real expiry would leave it stuck stale
-                    # while the scheduler still thinks nothing is due.
+                    # while the scheduler still thinks nothing is due. Also only do this when
+                    # the natural refresh is already due soon (see WARM_STAGGER_APPLY_WINDOW) -
+                    # otherwise a barcode with plenty of real validity left gets force-refreshed
+                    # early just to dodge a collision that's still many minutes away.
                     next_refresh_at = max(now, min(next_refresh_at, sibling_next - WARM_STAGGER_INTERVAL))
             set_warm_state(target, {
                 "next_refresh_at": next_refresh_at,
