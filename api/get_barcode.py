@@ -878,6 +878,11 @@ def perform_barcode_request(account_id, barcode_type, debug_mode=False, cache_on
                     stage = "type_tworld_tid_credentials"; mark(stage)
                     submit_tid_credentials(page, target, "tworld")
                     result = wait_for_tworld_result(page, 12000)
+                    if result == "timeout" and "auth.skt-id.co.kr" in safe_url(page):
+                        stage = "retry_tworld_idpw_login"; mark(stage)
+                        ensure_idpw_login_mode(page)
+                        submit_tid_credentials(page, target, "tworld-retry")
+                        result = wait_for_tworld_result(page, 12000)
                 else:
                     result = "callback"
                 print(f"debug tworld login result={result} url={safe_url(page)}", flush=True)
