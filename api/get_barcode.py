@@ -1,5 +1,5 @@
 from flask import Flask, request, Response
-import os, json, base64, io, time, re, urllib.request, urllib.error
+import os, json, base64, io, time, re, signal, urllib.request, urllib.error
 from cryptography.fernet import Fernet
 from playwright.sync_api import sync_playwright
 
@@ -34,6 +34,19 @@ WARM_STAGGER_INTERVAL = 3 * 60
 WARM_LOCK_TTL = 75
 WARM_CURRENT_TTL = 90
 LAST_BARCODE_RETENTION = 7 * 24 * 60 * 60
+# Vercel Runtime Timeout Error logs showed /api/warm_tick hitting the platform's own 60s
+# maxDuration and getting killed outright - which skips our except/finally entirely, so
+# release_browser_lock() and record_warm_result() never run. Raise our own timeout a few
+# seconds earlier so a slow scrape always fails through normal Python control flow instead.
+SCRAPE_BUDGET_SECONDS = 50
+
+
+class ScrapeTimeout(Exception):
+    pass
+
+
+def _scrape_alarm_handler(signum, frame):
+    raise ScrapeTimeout(f"scrape exceeded {SCRAPE_BUDGET_SECONDS}s internal budget")
 
 CODE128_PATTERNS = [
     "212222", "222122", "222221", "121223", "121322", "131222", "122213", "122312", "132212", "221213",
@@ -841,6 +854,10 @@ def perform_barcode_request(account_id, barcode_type, debug_mode=False, cache_on
     stage = "start"
     started = time.monotonic()
     def mark(label): print(f"debug elapsed={time.monotonic() - started:.1f}s stage={label}", flush=True)
+    has_alarm = hasattr(signal, "alarm")
+    if has_alarm:
+        signal.signal(signal.SIGALRM, _scrape_alarm_handler)
+        signal.alarm(SCRAPE_BUDGET_SECONDS)
     try:
         stage = "decrypt_accounts"; mark(stage)
         accounts = decrypt_accounts()
@@ -959,10 +976,15 @@ def perform_barcode_request(account_id, barcode_type, debug_mode=False, cache_on
                 set_cached_barcode(account_id, barcode_number, seconds_left)
                 return barcode_response(barcode_number, seconds_left)
             return image_response(f"Barcode number not found\nID: {account_id}\nbarcode_result={barcode_result}\nurl={safe_url(page)}\nbody={get_body_text(page, 260)}"), 502
+    except ScrapeTimeout as exc:
+        print(f"Scrape timed out for {account_id} at {stage}: elapsed={time.monotonic() - started:.1f}s", flush=True)
+        return image_response(f"Barcode scrape exceeded {SCRAPE_BUDGET_SECONDS}s budget\nID: {account_id}\nstage={stage}"), 504
     except Exception as exc:
         print(f"Error processing {account_id} at {stage}: {type(exc).__name__}: {exc}", flush=True)
         return image_response(f"Barcode failed\nID: {account_id}\n{stage}: {type(exc).__name__}: {exc}"), 502
     finally:
+        if has_alarm:
+            signal.alarm(0)
         release_browser_lock(lock_token)
         if browser:
             try: browser.close()
