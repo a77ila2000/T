@@ -27,6 +27,12 @@ WARM_TARGETS = [
 WARM_SUCCESS_INTERVAL = 20 * 60
 WARM_FAIL_INTERVAL = 3 * 60
 WARM_STAGGER_INTERVAL = 3 * 60
+# Must stay close to get_barcode.py/warm_tick.py's vercel.json maxDuration (60s): if Vercel
+# kills a scrape for running too long, nothing releases the lock, so it can only self-heal
+# once its TTL expires. A lock TTL far beyond maxDuration (the old value was 170s) means a
+# single killed attempt can block every other target for minutes.
+WARM_LOCK_TTL = 75
+WARM_CURRENT_TTL = 90
 LAST_BARCODE_RETENTION = 7 * 24 * 60 * 60
 
 CODE128_PATTERNS = [
@@ -223,7 +229,7 @@ def json_response(payload, status=200):
 
 def acquire_warm_lock():
     token = f"warm:{time.time()}"
-    result = redis_command(["SET", warm_lock_key(), token, "EX", 170, "NX"])
+    result = redis_command(["SET", warm_lock_key(), token, "EX", WARM_LOCK_TTL, "NX"])
     if result == "OK":
         return token
     return None
@@ -698,7 +704,7 @@ def warm_next():
         "id": target["id"],
         "type": target["type"],
         "name": target["name"],
-    }), "EX", 180])
+    }), "EX", WARM_CURRENT_TTL])
     return json_response({
         "status": "ok",
         "now": now,
@@ -765,7 +771,7 @@ def warm_tick():
         "id": target["id"],
         "type": target["type"],
         "name": target["name"],
-    }), "EX", 180])
+    }), "EX", WARM_CURRENT_TTL])
     try:
         result = perform_barcode_request(target["id"], target["type"])
         if isinstance(result, tuple):
