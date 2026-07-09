@@ -25,7 +25,7 @@ WARM_TARGETS = [
     {"id": "min560728", "type": "general", "name": "father-general"},
 ]
 WARM_SUCCESS_INTERVAL = 20 * 60
-WARM_FAIL_INTERVAL = 3 * 60
+WARM_FAIL_INTERVAL = 30
 WARM_STAGGER_INTERVAL = 3 * 60
 # Must stay close to get_barcode.py/warm_tick.py's vercel.json maxDuration (60s): if Vercel
 # kills a scrape for running too long, nothing releases the lock, so it can only self-heal
@@ -162,8 +162,9 @@ def get_cached_barcode(account_id, barcode_type="universe", allow_stale=False):
 def compute_failure_retry_delay(existing):
     # First failure after a success (or a fresh target) retries immediately so it doesn't
     # lose its place behind targets on the normal ~20 minute cycle. A second consecutive
-    # failure falls back to the normal cool-down so a genuinely broken target doesn't
-    # hot-loop and starve everything else of the single shared browser session.
+    # failure backs off by WARM_FAIL_INTERVAL (30s) instead of retrying instantly again,
+    # so any other already-due target gets a turn first; if nothing else is due, this
+    # target simply comes back around after the 30s cool-down.
     consecutive_failures = int(existing.get("consecutive_failures", 0)) + 1
     delay = 0 if consecutive_failures == 1 else WARM_FAIL_INTERVAL
     return delay, consecutive_failures
