@@ -26,11 +26,6 @@ WARM_TARGETS = [
 ]
 WARM_SUCCESS_INTERVAL = 20 * 60
 WARM_FAIL_INTERVAL = 30
-WARM_STAGGER_INTERVAL = 3 * 60
-# Only pull a schedule earlier for sibling separation when it's already due soon - otherwise
-# a barcode with plenty of real validity left gets force-refreshed early just to dodge a
-# sibling collision that's still many minutes away and may not even matter by then.
-WARM_STAGGER_APPLY_WINDOW = 5 * 60
 # Must stay close to get_barcode.py/warm_tick.py's vercel.json maxDuration (60s): if Vercel
 # kills a scrape for running too long, nothing releases the lock, so it can only self-heal
 # once its TTL expires. A lock TTL far beyond maxDuration (the old value was 170s) means a
@@ -163,6 +158,27 @@ def get_cached_barcode(account_id, barcode_type="universe", allow_stale=False):
         return None
 
 
+def resync_warm_schedule_from_cache(account_id, barcode_type, cached):
+    # perform_barcode_request can return a still-valid cached barcode without ever calling
+    # set_cached_barcode (no real scrape happened). If the scheduler's next_refresh_at for
+    # this target was ever earlier than the cache's real remaining validity - from a debug
+    # call, clock drift, or a stale value left over from before this fix - that "success"
+    # would otherwise never advance next_refresh_at, freezing it "due" forever and starving
+    # every other target, since select_warm_target always picks the most overdue first.
+    target = next((item for item in WARM_TARGETS if item["id"] == account_id and item["type"] == barcode_type), None)
+    if not target:
+        return
+    now = int(time.time())
+    seconds_left = max(0, int(cached.get("seconds_left", 0)))
+    correct_next_refresh_at = now + min(seconds_left, WARM_SUCCESS_INTERVAL)
+    existing = get_warm_state(target)
+    if int(existing.get("next_refresh_at") or 0) >= correct_next_refresh_at:
+        return
+    state = dict(existing)
+    state["next_refresh_at"] = correct_next_refresh_at
+    set_warm_state(target, state)
+
+
 def compute_failure_retry_delay(existing):
     # First failure after a success (or a fresh target) retries immediately so it doesn't
     # lose its place behind targets on the normal ~20 minute cycle. A second consecutive
@@ -190,19 +206,14 @@ def set_cached_barcode(account_id, number, seconds_left, barcode_type="universe"
         now = int(time.time())
         existing = get_warm_state(target)
         if write_result == "OK":
+            # Deliberately NOT staggered against the sibling barcode type here. Pulling this
+            # schedule earlier than the real ttl doesn't force an earlier real refresh anyway -
+            # perform_barcode_request short-circuits to the still-valid cache whenever it's
+            # invoked before the barcode actually goes stale, so an earlier-than-necessary
+            # next_refresh_at just produces a no-op cache-hit cycle. Real staggering only
+            # matters once a barcode is genuinely due, which resync_warm_schedule_from_cache
+            # below handles by re-syncing to the barcode's actual remaining validity.
             next_refresh_at = now + min(ttl, WARM_SUCCESS_INTERVAL)
-            sibling_type = "general" if barcode_type == "universe" else "universe"
-            sibling = next((item for item in WARM_TARGETS if item["id"] == account_id and item["type"] == sibling_type), None)
-            if sibling and next_refresh_at - now <= WARM_STAGGER_APPLY_WINDOW:
-                sibling_next = int(get_warm_state(sibling).get("next_refresh_at") or 0)
-                if sibling_next and abs(next_refresh_at - sibling_next) < WARM_STAGGER_INTERVAL:
-                    # Only ever pull the schedule earlier for separation, never push it later -
-                    # delaying past this barcode's own real expiry would leave it stuck stale
-                    # while the scheduler still thinks nothing is due. Also only do this when
-                    # the natural refresh is already due soon (see WARM_STAGGER_APPLY_WINDOW) -
-                    # otherwise a barcode with plenty of real validity left gets force-refreshed
-                    # early just to dodge a collision that's still many minutes away.
-                    next_refresh_at = max(now, min(next_refresh_at, sibling_next - WARM_STAGGER_INTERVAL))
             set_warm_state(target, {
                 "next_refresh_at": next_refresh_at,
                 "last_success_at": now,
@@ -892,6 +903,7 @@ def perform_barcode_request(account_id, barcode_type, debug_mode=False, cache_on
             return f"Account not found: {account_id}", 404
         cached = get_cached_barcode(account_id, barcode_type)
         if not debug_mode and cached:
+            resync_warm_schedule_from_cache(account_id, barcode_type, cached)
             return barcode_response(cached["number"], cached.get("seconds_left", 0), cached.get("grade", ""), cached.get("stale", False))
         if cache_only:
             cached = get_cached_barcode(account_id, barcode_type, allow_stale=True)
@@ -902,6 +914,7 @@ def perform_barcode_request(account_id, barcode_type, debug_mode=False, cache_on
         if UPSTASH_REDIS_REST_URL and UPSTASH_REDIS_REST_TOKEN and not lock_token:
             cached = get_cached_barcode(account_id, barcode_type, allow_stale=True)
             if not debug_mode and cached:
+                resync_warm_schedule_from_cache(account_id, barcode_type, cached)
                 return barcode_response(cached["number"], cached.get("seconds_left", 0), cached.get("grade", ""), cached.get("stale", False))
             resp = image_response(f"Another barcode refresh is already running\nID: {account_id}\nRetry shortly", color=(255, 248, 225))
             resp.status_code = 423
