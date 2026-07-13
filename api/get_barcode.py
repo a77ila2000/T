@@ -6,7 +6,8 @@ from playwright.sync_api import sync_playwright
 app = Flask(__name__)
 ENCRYPTION_KEY_B64 = os.environ.get("ENCRYPTION_KEY")
 ENCRYPTED_ACCOUNTS_B64 = os.environ.get("ENCRYPTED_ACCOUNTS")
-BROWSERLESS_TOKEN = os.environ.get("BROWSERLESS_TOKEN", "2Uq9iBy84O6QGwO008597820ed94cb8fb02789f1092d91545")
+BROWSERLESS_TOKEN = os.environ.get("BROWSERLESS_TOKEN", "")
+BROWSERLESS_WS_URL = os.environ.get("BROWSERLESS_WS_URL", "ws://193.123.162.16:3000")
 UPSTASH_REDIS_REST_URL = os.environ.get("UPSTASH_REDIS_REST_URL", "").rstrip("/")
 UPSTASH_REDIS_REST_TOKEN = os.environ.get("UPSTASH_REDIS_REST_TOKEN", "")
 MY_PAGE_URL = "https://m.sktuniverse.co.kr/my"
@@ -937,7 +938,7 @@ def perform_barcode_request(account_id, barcode_type, debug_mode=False, cache_on
             return resp
         with sync_playwright() as p:
             stage = "connect_browserless"; mark(stage)
-            browser = p.chromium.connect_over_cdp(f"wss://chrome.browserless.io?token={BROWSERLESS_TOKEN}&stealth=true&timeout=60000", timeout=8000)
+            browser = p.chromium.connect_over_cdp(f"{BROWSERLESS_WS_URL}?token={BROWSERLESS_TOKEN}&stealth=true&timeout=60000", timeout=8000)
             context = browser.new_context(viewport={"width": 412, "height": 915}, user_agent=MOBILE_USER_AGENT, is_mobile=True, has_touch=True)
             page = context.new_page(); page.set_default_timeout(6000)
             if barcode_type == "general":
