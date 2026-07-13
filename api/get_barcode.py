@@ -263,6 +263,32 @@ def set_warm_state(target, state):
     redis_command(["SET", warm_state_key(target["id"], target["type"]), json.dumps(state), "EX", 7 * 24 * 60 * 60])
 
 
+def login_state_key(account_id, barcode_type):
+    return f"barcode:loginstate:{normalize_barcode_type(barcode_type)}:{account_id}"
+
+
+def get_login_state(account_id, barcode_type):
+    raw = redis_command(["GET", login_state_key(account_id, barcode_type)])
+    if not raw:
+        return None
+    try:
+        return json.loads(raw)
+    except Exception as exc:
+        print(f"login state parse failed: {exc}", flush=True)
+        return None
+
+
+def set_login_state(account_id, barcode_type, storage_state, login_url):
+    # 3-minute TTL: enough for ~2 warm_tick cron cycles to pick up the follow-up step, but
+    # short enough that a state nobody ever resumes doesn't linger and get reused stale.
+    payload = {"storage_state": storage_state, "login_url": login_url, "saved_at": int(time.time())}
+    redis_command(["SET", login_state_key(account_id, barcode_type), json.dumps(payload), "EX", 180])
+
+
+def clear_login_state(account_id, barcode_type):
+    redis_command(["DEL", login_state_key(account_id, barcode_type)])
+
+
 def select_warm_target(now=None):
     now = int(now or time.time())
     selected = None
@@ -855,6 +881,23 @@ def warm_tick():
         print(f"warm_tick failed for {target['id']}/{target['type']}: {type(exc).__name__}: {exc}", flush=True)
         http_code = 500
         success = False
+    if http_code == 202:
+        # Universe-type step 1 (login page reached, state saved) - neither a success nor a
+        # failure, so don't touch consecutive_failures/last_success_at/last_failure_at. Just
+        # make the target due again immediately so the very next cron tick picks it up for
+        # step 2 while the saved login state is still fresh.
+        release_warm_lock(lock_token)
+        existing = get_warm_state(target)
+        state = dict(existing)
+        state["next_refresh_at"] = now
+        set_warm_state(target, state)
+        return json_response({
+            "status": "pending_step2",
+            "id": target["id"],
+            "type": target["type"],
+            "name": target["name"],
+            "next_refresh_at": state["next_refresh_at"],
+        })
     state = record_warm_result(target, lock_token, success, str(http_code))
     return json_response({
         "status": "done",
@@ -1014,41 +1057,68 @@ def perform_barcode_request(account_id, barcode_type, debug_mode=False, cache_on
                     f"Tworld membership barcode not found\nID: {account_id}\nstate={barcode_api.get('membership_state')}\nresp={barcode_api.get('resp_code')}\nmessage={barcode_api.get('message') or barcode_api.get('raw')}"
                 ), 502
             else:
-                stage = "open_tid_from_my"; mark(stage)
-                open_tid_from_my(page, mark)
-                mark("after_open_tid_from_my")
-                wait_for_tid_login_form(page, 8000)
-                stage = "type_tid_credentials"; mark(stage)
-                submit_tid_credentials(page, target)
-                mark("after_submit_tid_credentials")
-                result = wait_for_tid_result(page, 10000)
-                if result == "timeout" and "auth.skt-id.co.kr" in safe_url(page) and (time.monotonic() - started) < (SCRAPE_BUDGET_SECONDS - 15):
-                    stage = "retry_tid_idpw_login"; mark(stage)
-                    ensure_idpw_login_mode(page)
-                    submit_tid_credentials(page, target, "retry")
+                # The universe/T-ID login (recaptcha-gated) alone can take ~40-50s on the
+                # self-hosted VM's single vCPU - too close to Vercel's 60s ceiling to also
+                # fit the barcode read afterward. Split across two warm_tick cycles instead:
+                # step 1 gets to the login form and saves cookies+URL to Redis; step 2 (the
+                # next cycle, ~1min later) resumes from there and finishes the login + read.
+                login_state = get_login_state(account_id, barcode_type)
+                if login_state:
+                    stage = "restore_login_state"; mark(stage)
+                    context = browser.new_context(
+                        storage_state=login_state["storage_state"],
+                        viewport={"width": 412, "height": 915}, user_agent=MOBILE_USER_AGENT, is_mobile=True, has_touch=True,
+                    )
+                    page = context.new_page(); page.set_default_timeout(6000)
+                    goto_page(page, login_state["login_url"], timeout=9000)
+                    mark("after_restore_login_state")
+                    # Consume the saved state unconditionally (success or not) - reusing a
+                    # state that just failed risks replaying an already-expired login token.
+                    clear_login_state(account_id, barcode_type)
+                    try:
+                        wait_for_tid_login_form(page, 8000)
+                    except Exception as exc:
+                        print(f"debug saved login state expired/invalid: {type(exc).__name__}: {exc}", flush=True)
+                        return image_response(f"Saved login session expired, retrying fresh\nID: {account_id}"), 504
+                    stage = "type_tid_credentials"; mark(stage)
+                    submit_tid_credentials(page, target)
+                    mark("after_submit_tid_credentials")
                     result = wait_for_tid_result(page, 10000)
-                    mark("after_retry_tid_idpw_login")
-                print(f"debug tid submit result={result} url={safe_url(page)}", flush=True)
-                if debug_mode and result == "timeout":
-                    return diagnostic_response(page, context, account_id, result, time.monotonic() - started)
-                stage = "open_my_after_login"; mark(stage)
-                goto_page(page, MY_PAGE_URL, timeout=9000)
-                wait_for_my_ready(page, 5000)
-                print(f"debug final my url={safe_url(page)} body={get_body_text(page, 260)}", flush=True)
-                stage = "fetch_barcode_data"; mark(stage)
-                barcode_api = fetch_barcode_data(page)
-                print(f"debug barcode api={barcode_api}", flush=True)
-                if barcode_api.get("number"):
-                    set_cached_barcode(account_id, barcode_api["number"], barcode_api.get("seconds_left", 20 * 60), barcode_type)
-                    return barcode_response(barcode_api["number"], barcode_api.get("seconds_left", 20 * 60))
-                if barcode_api.get("code") in ["MSG0115", "MSG0116", "MSG0118", "MSG0120"]:
-                    return image_response(
-                        f"T membership is required for barcode\nID: {account_id}\ncode={barcode_api.get('code')}\nmessage={barcode_api.get('message') or barcode_api.get('raw')}"
-                    ), 409
-                if barcode_api.get("code") == "MSG0998":
-                    return image_response(
-                        f"T membership card cancellation is in progress\nID: {account_id}\ncode={barcode_api.get('code')}\nmessage={barcode_api.get('message') or barcode_api.get('raw')}"
-                    ), 409
+                    if result == "timeout" and "auth.skt-id.co.kr" in safe_url(page) and (time.monotonic() - started) < (SCRAPE_BUDGET_SECONDS - 15):
+                        stage = "retry_tid_idpw_login"; mark(stage)
+                        ensure_idpw_login_mode(page)
+                        submit_tid_credentials(page, target, "retry")
+                        result = wait_for_tid_result(page, 10000)
+                        mark("after_retry_tid_idpw_login")
+                    print(f"debug tid submit result={result} url={safe_url(page)}", flush=True)
+                    if debug_mode and result == "timeout":
+                        return diagnostic_response(page, context, account_id, result, time.monotonic() - started)
+                    stage = "open_my_after_login"; mark(stage)
+                    goto_page(page, MY_PAGE_URL, timeout=9000)
+                    wait_for_my_ready(page, 5000)
+                    print(f"debug final my url={safe_url(page)} body={get_body_text(page, 260)}", flush=True)
+                    stage = "fetch_barcode_data"; mark(stage)
+                    barcode_api = fetch_barcode_data(page)
+                    print(f"debug barcode api={barcode_api}", flush=True)
+                    if barcode_api.get("number"):
+                        set_cached_barcode(account_id, barcode_api["number"], barcode_api.get("seconds_left", 20 * 60), barcode_type)
+                        return barcode_response(barcode_api["number"], barcode_api.get("seconds_left", 20 * 60))
+                    if barcode_api.get("code") in ["MSG0115", "MSG0116", "MSG0118", "MSG0120"]:
+                        return image_response(
+                            f"T membership is required for barcode\nID: {account_id}\ncode={barcode_api.get('code')}\nmessage={barcode_api.get('message') or barcode_api.get('raw')}"
+                        ), 409
+                    if barcode_api.get("code") == "MSG0998":
+                        return image_response(
+                            f"T membership card cancellation is in progress\nID: {account_id}\ncode={barcode_api.get('code')}\nmessage={barcode_api.get('message') or barcode_api.get('raw')}"
+                        ), 409
+                else:
+                    stage = "open_tid_from_my"; mark(stage)
+                    open_tid_from_my(page, mark)
+                    mark("after_open_tid_from_my")
+                    wait_for_tid_login_form(page, 8000)
+                    stage = "save_login_state"; mark(stage)
+                    set_login_state(account_id, barcode_type, context.storage_state(), safe_url(page))
+                    return image_response(f"Login page ready\nID: {account_id}\nContinuing next cycle"), 202
             stage = "open_barcode_view"; mark(stage)
             if time.monotonic() - started > 52:
                 return image_response(f"Barcode timed out before opening view\nID: {account_id}\nelapsed={time.monotonic() - started:.1f}s"), 504
