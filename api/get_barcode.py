@@ -947,10 +947,12 @@ def perform_barcode_request(account_id, barcode_type, debug_mode=False, cache_on
                 stage = "open_tworld_login"; mark(stage)
                 goto_page(page, TWORLD_LOGIN_URL, timeout=12000)
                 page.wait_for_timeout(900)
+                mark("after_goto_tworld_login")
                 if "m.tworld.co.kr" not in safe_url(page):
                     wait_for_tid_login_form(page, 10000)
                     stage = "type_tworld_tid_credentials"; mark(stage)
                     submit_tid_credentials(page, target, "tworld")
+                    mark("after_submit_tworld_tid_credentials")
                     result = wait_for_tworld_result(page, 12000)
                     # The idpw retry can itself run ~15-20s uninterrupted (no mark() check
                     # inside it), so skip it once there isn't enough budget headroom left to
@@ -991,9 +993,11 @@ def perform_barcode_request(account_id, barcode_type, debug_mode=False, cache_on
             else:
                 stage = "open_tid_from_my"; mark(stage)
                 open_tid_from_my(page)
+                mark("after_open_tid_from_my")
                 wait_for_tid_login_form(page, 8000)
                 stage = "type_tid_credentials"; mark(stage)
                 submit_tid_credentials(page, target)
+                mark("after_submit_tid_credentials")
                 result = wait_for_tid_result(page, 10000)
                 if result == "timeout" and "auth.skt-id.co.kr" in safe_url(page) and (time.monotonic() - started) < (SCRAPE_BUDGET_SECONDS - 15):
                     stage = "retry_tid_idpw_login"; mark(stage)
