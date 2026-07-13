@@ -1107,8 +1107,10 @@ def perform_barcode_request(account_id, barcode_type, debug_mode=False, cache_on
                 badge_clicked = page.evaluate("""
                 () => {
                   const all = Array.from(document.querySelectorAll('*'));
+                  // "구독중" (subscribed) and "인증대기" (pending verification) badges both
+                  // lead through the same SSO handoff when clicked - confirmed manually.
                   const candidates = all
-                    .filter((el) => (el.innerText || el.textContent || '').trim().includes('구독중'))
+                    .filter((el) => /구독중|인증대기/.test((el.innerText || el.textContent || '').trim()))
                     .filter((el) => (el.innerText || el.textContent || '').trim().length < 20)
                     .sort((a, b) => a.querySelectorAll('*').length - b.querySelectorAll('*').length);
                   if (candidates.length === 0) return 'no-badge-found';
