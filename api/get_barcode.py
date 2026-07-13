@@ -952,7 +952,12 @@ def perform_barcode_request(account_id, barcode_type, debug_mode=False, cache_on
             return resp
         with sync_playwright() as p:
             stage = "connect_browserless"; mark(stage)
-            browser = p.chromium.connect_over_cdp(f"{BROWSERLESS_WS_URL}?token={BROWSERLESS_TOKEN}&stealth=true&timeout=60000", timeout=8000)
+            # 8s was too tight: launching a fresh Chromium process on the self-hosted VM's
+            # single vCPU occasionally takes longer than that on its own (observed directly -
+            # the server-side logs kept launching successfully while the client had already
+            # given up), which was producing clean-looking but avoidable connection failures.
+            browser = p.chromium.connect_over_cdp(f"{BROWSERLESS_WS_URL}?token={BROWSERLESS_TOKEN}&stealth=true&timeout=60000", timeout=20000)
+            mark("connected_browserless")
             context = browser.new_context(viewport={"width": 412, "height": 915}, user_agent=MOBILE_USER_AGENT, is_mobile=True, has_touch=True)
             page = context.new_page(); page.set_default_timeout(6000)
             if barcode_type == "general":
