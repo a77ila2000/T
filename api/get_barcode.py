@@ -598,20 +598,32 @@ def wait_for_tworld_result(page, timeout_ms=12000):
     return "timeout"
 
 
-def open_tid_from_my(page):
+def open_tid_from_my(page, mark=None):
+    # goto_page() swallows its own timeout exceptions and just carries on, so without a
+    # checkpoint after each hop, a slow run can silently burn through all four navigations'
+    # worst-case timeouts (7+8+12+12=39s) before perform_barcode_request's own mark() calls
+    # ever get a chance to bail - which is exactly the failure mode that kept exceeding
+    # Vercel's 60s hard kill on the self-hosted VM's single vCPU.
+    def checkpoint(label):
+        if mark:
+            mark(label)
     goto_page(page, MY_PAGE_URL, timeout=7000)
+    checkpoint("tid_my_page")
     page.wait_for_timeout(400)
     goto_page(page, LOGIN_VIEW_URL, timeout=8000, referer=MY_PAGE_URL)
+    checkpoint("tid_login_view")
     page.wait_for_timeout(600)
     referer = safe_url(page) if "sktuniverse" in safe_url(page) else LOGIN_VIEW_URL
     print(f"debug direct authorize from login view url={safe_url(page)} body={get_body_text(page, 180)}", flush=True)
     goto_page(page, TID_AUTHORIZE_URL, timeout=12000, referer=referer)
+    checkpoint("tid_authorize")
     page.wait_for_timeout(600)
     if "auth.skt-id.co.kr" not in safe_url(page) and "tapi.t-id.co.kr" not in safe_url(page):
         physical_tap_at(page, 206, 470)
         page.wait_for_timeout(900)
         print(f"debug direct authorize retry after coordinate tap url={safe_url(page)}", flush=True)
         goto_page(page, TID_AUTHORIZE_URL, timeout=12000, referer=referer)
+        checkpoint("tid_authorize_retry")
         page.wait_for_timeout(600)
     print(f"debug tid entry url={safe_url(page)} body={get_body_text(page, 180)}", flush=True)
 
@@ -992,7 +1004,7 @@ def perform_barcode_request(account_id, barcode_type, debug_mode=False, cache_on
                 ), 502
             else:
                 stage = "open_tid_from_my"; mark(stage)
-                open_tid_from_my(page)
+                open_tid_from_my(page, mark)
                 mark("after_open_tid_from_my")
                 wait_for_tid_login_form(page, 8000)
                 stage = "type_tid_credentials"; mark(stage)
