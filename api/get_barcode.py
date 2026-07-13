@@ -8,6 +8,11 @@ ENCRYPTION_KEY_B64 = os.environ.get("ENCRYPTION_KEY")
 ENCRYPTED_ACCOUNTS_B64 = os.environ.get("ENCRYPTED_ACCOUNTS")
 BROWSERLESS_TOKEN = os.environ.get("BROWSERLESS_TOKEN", "")
 BROWSERLESS_WS_URL = os.environ.get("BROWSERLESS_WS_URL", "ws://193.123.162.16:3000")
+# universe-type scrapes (T ID + recaptcha) run on a second self-hosted instance so they
+# don't queue behind general-type scrapes on the same CONCURRENT=1 browserless server -
+# that queueing was itself burning through the request's time budget.
+BROWSERLESS_WS_URL_UNIVERSE = os.environ.get("BROWSERLESS_WS_URL_UNIVERSE", "ws://152.70.97.173:3000")
+BROWSERLESS_TOKEN_UNIVERSE = os.environ.get("BROWSERLESS_TOKEN_UNIVERSE", "")
 UPSTASH_REDIS_REST_URL = os.environ.get("UPSTASH_REDIS_REST_URL", "").rstrip("/")
 UPSTASH_REDIS_REST_TOKEN = os.environ.get("UPSTASH_REDIS_REST_TOKEN", "")
 MY_PAGE_URL = "https://m.sktuniverse.co.kr/my"
@@ -956,7 +961,8 @@ def perform_barcode_request(account_id, barcode_type, debug_mode=False, cache_on
             # single vCPU occasionally takes longer than that on its own (observed directly -
             # the server-side logs kept launching successfully while the client had already
             # given up), which was producing clean-looking but avoidable connection failures.
-            browser = p.chromium.connect_over_cdp(f"{BROWSERLESS_WS_URL}?token={BROWSERLESS_TOKEN}&stealth=true&timeout=60000", timeout=20000)
+            ws_url, ws_token = (BROWSERLESS_WS_URL_UNIVERSE, BROWSERLESS_TOKEN_UNIVERSE) if barcode_type == "universe" else (BROWSERLESS_WS_URL, BROWSERLESS_TOKEN)
+            browser = p.chromium.connect_over_cdp(f"{ws_url}?token={ws_token}&stealth=true&timeout=60000", timeout=20000)
             mark("connected_browserless")
             context = browser.new_context(viewport={"width": 412, "height": 915}, user_agent=MOBILE_USER_AGENT, is_mobile=True, has_touch=True)
             page = context.new_page(); page.set_default_timeout(6000)
