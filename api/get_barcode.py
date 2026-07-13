@@ -1014,11 +1014,11 @@ def perform_barcode_request(account_id, barcode_type, debug_mode=False, cache_on
             # single vCPU occasionally takes longer than that on its own (observed directly -
             # the server-side logs kept launching successfully while the client had already
             # given up), which was producing clean-looking but avoidable connection failures.
-            # universe-type now uses the same server as general (BROWSERLESS_WS_URL) - the
-            # SSO fast-path below means universe no longer needs its own recaptcha-heavy
-            # session isolated from general's, so there's no reason to keep it on a second,
-            # separately-strained instance anymore.
-            ws_url, ws_token = BROWSERLESS_WS_URL, BROWSERLESS_TOKEN
+            # Reverted: merging universe onto the general server caused BOTH types to start
+            # failing (contention for the single CONCURRENT=1 slot) - even general-only
+            # requests started timing out. Splitting servers isn't about recaptcha isolation
+            # after all, it's just about not having 6 accounts x 2 types queue for one slot.
+            ws_url, ws_token = (BROWSERLESS_WS_URL_UNIVERSE, BROWSERLESS_TOKEN_UNIVERSE) if barcode_type == "universe" else (BROWSERLESS_WS_URL, BROWSERLESS_TOKEN)
             browser = p.chromium.connect_over_cdp(f"{ws_url}?token={ws_token}&stealth=true&timeout=60000", timeout=20000)
             mark("connected_browserless")
             context = browser.new_context(viewport={"width": 412, "height": 915}, user_agent=MOBILE_USER_AGENT, is_mobile=True, has_touch=True)
