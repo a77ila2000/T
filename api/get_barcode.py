@@ -910,6 +910,16 @@ def warm_tick():
     })
 
 
+@app.route("/api/sso_debug", methods=["GET"])
+def sso_debug():
+    universe_ids = sorted({t["id"] for t in WARM_TARGETS if t["type"] == "universe"})
+    out = {}
+    for account_id in universe_ids:
+        raw = redis_command(["GET", f"barcode:ssodebug:{account_id}"])
+        out[account_id] = json.loads(raw) if raw else None
+    return json_response(out)
+
+
 @app.route("/api/warm_status", methods=["GET"])
 def warm_status():
     now = int(time.time())
@@ -1106,6 +1116,7 @@ def perform_barcode_request(account_id, barcode_type, debug_mode=False, cache_on
                 }
                 """)
                 print(f"debug universe sso badge click={badge_clicked}", flush=True)
+                sso_debug = {"badge_clicked": badge_clicked, "ts": int(time.time())}
 
                 sso_popup_page = None
                 if badge_clicked == "clicked":
@@ -1114,16 +1125,22 @@ def perform_barcode_request(account_id, barcode_type, debug_mode=False, cache_on
                             sso_popup_page = sso_popup_holder["page"]
                             break
                         page.wait_for_timeout(200)
+                sso_debug["popup_found"] = bool(sso_popup_page)
 
                 if sso_popup_page:
                     mark("wait_for_universe_sso_popup_settle")
                     sso_popup_page.wait_for_timeout(3000)
+                    sso_debug["popup_url"] = sso_popup_page.url
                     stage = "fetch_barcode_data_via_sso"; mark(stage)
                     sso_barcode_api = fetch_barcode_data(sso_popup_page)
                     print(f"debug universe sso barcode api={sso_barcode_api}", flush=True)
+                    sso_debug["barcode_api"] = sso_barcode_api
+                    redis_command(["SET", f"barcode:ssodebug:{account_id}", json.dumps(sso_debug), "EX", 600])
                     if sso_barcode_api.get("number"):
                         set_cached_barcode(account_id, sso_barcode_api["number"], sso_barcode_api.get("seconds_left", 20 * 60), barcode_type)
                         return barcode_response(sso_barcode_api["number"], sso_barcode_api.get("seconds_left", 20 * 60))
+                else:
+                    redis_command(["SET", f"barcode:ssodebug:{account_id}", json.dumps(sso_debug), "EX", 600])
 
                 # --- fallback: slower two-step T-ID/recaptcha login, only reached if the SSO
                 # shortcut above didn't work (no subscription, badge missing, popup failed, etc)

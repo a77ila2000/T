@@ -19,6 +19,10 @@
     {
       "source": "/api/warm_tick",
       "destination": "/api/warm_tick.py"
+    },
+    {
+      "source": "/api/sso_debug",
+      "destination": "/api/sso_debug.py"
     }
   ],
   "headers": [
