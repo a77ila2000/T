@@ -952,7 +952,11 @@ def perform_barcode_request(account_id, barcode_type, debug_mode=False, cache_on
                     stage = "type_tworld_tid_credentials"; mark(stage)
                     submit_tid_credentials(page, target, "tworld")
                     result = wait_for_tworld_result(page, 12000)
-                    if result == "timeout" and "auth.skt-id.co.kr" in safe_url(page):
+                    # The idpw retry can itself run ~15-20s uninterrupted (no mark() check
+                    # inside it), so skip it once there isn't enough budget headroom left to
+                    # absorb that on top of the current elapsed time - better a clean early
+                    # failure than running past Vercel's own 60s hard kill.
+                    if result == "timeout" and "auth.skt-id.co.kr" in safe_url(page) and (time.monotonic() - started) < (SCRAPE_BUDGET_SECONDS - 15):
                         stage = "retry_tworld_idpw_login"; mark(stage)
                         ensure_idpw_login_mode(page)
                         submit_tid_credentials(page, target, "tworld-retry")
@@ -991,7 +995,7 @@ def perform_barcode_request(account_id, barcode_type, debug_mode=False, cache_on
                 stage = "type_tid_credentials"; mark(stage)
                 submit_tid_credentials(page, target)
                 result = wait_for_tid_result(page, 10000)
-                if result == "timeout" and "auth.skt-id.co.kr" in safe_url(page):
+                if result == "timeout" and "auth.skt-id.co.kr" in safe_url(page) and (time.monotonic() - started) < (SCRAPE_BUDGET_SECONDS - 15):
                     stage = "retry_tid_idpw_login"; mark(stage)
                     ensure_idpw_login_mode(page)
                     submit_tid_credentials(page, target, "retry")
