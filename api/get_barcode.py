@@ -40,10 +40,12 @@ LAST_BARCODE_RETENTION = 7 * 24 * 60 * 60
 # transition (see mark() below) rather than relying on signal.alarm alone, since Vercel
 # kept hitting its own 60s kill even with the alarm armed - most likely because the Python
 # runtime here doesn't execute request handling on the main thread, where signal.alarm is a
-# silent no-op. Kept well under 60s: a single retry-driven step between checkpoints can run
-# up to ~25s on its own, so this needs enough headroom that one more such step still lands
-# safely under the platform limit once caught at the next checkpoint.
-SCRAPE_BUDGET_SECONDS = 35
+# silent no-op. The self-hosted Browserless VM (1 vCPU) runs the full login flow in ~50-55s
+# on its own, well above the old 35s budget - that guaranteed a ScrapeTimeout every run. Set
+# closer to the platform ceiling to let real runs finish; the browser-lock's own 90s Redis
+# TTL (acquire_browser_lock) is the backstop if a rare slow step still gets hard-killed
+# past 60s instead of hitting this check cleanly.
+SCRAPE_BUDGET_SECONDS = 50
 
 
 class ScrapeTimeout(Exception):
