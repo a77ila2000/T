@@ -32,24 +32,15 @@ WARM_TARGETS = [
 ]
 WARM_SUCCESS_INTERVAL = 20 * 60
 WARM_FAIL_INTERVAL = 30
-# Real barcodes are valid ~20 minutes; splitting that into one evenly-spaced slot per target
-# (anchored to absolute epoch time, not "now + remaining") guarantees at most one target is
-# ever due at once, so the app's 6 barcodes don't all go stale together. The cycle is shorter
-# than the real ~20min TTL (2min margin) so a target's assigned slot always lands before its
-# cache would actually expire. This must be idempotent (same target + same now -> same slot)
-# so it works identically whether called from a real refresh or the cache-hit resync path.
-WARM_STAGGER_CYCLE_SECONDS = 18 * 60
-
-
-def epoch_aligned_next_refresh(target, now):
-    index = next((i for i, t in enumerate(WARM_TARGETS) if t["id"] == target["id"] and t["type"] == target["type"]), 0)
-    slot_width = WARM_STAGGER_CYCLE_SECONDS // len(WARM_TARGETS)
-    offset = index * slot_width
-    cycle_start = (now // WARM_STAGGER_CYCLE_SECONDS) * WARM_STAGGER_CYCLE_SECONDS
-    due = cycle_start + offset
-    if due <= now:
-        due += WARM_STAGGER_CYCLE_SECONDS
-    return due
+# The site itself won't renew a barcode's ~20min validity early - refreshing before the real
+# expiry just gets the same barcode back, so next_refresh_at MUST be based on the real
+# remaining seconds_left from the API response, never an artificially-pulled-earlier slot
+# (a prior version tried a fixed epoch-aligned stagger to spread the 6 targets out, but that
+# meant attempting a refresh ~2min before real expiry, which can't actually renew anything).
+# Staggering instead falls out naturally: only one target can be scraped at a time (the
+# global browser lock), so each real refresh lands at a different wall-clock moment, and
+# since next_refresh_at is always "this target's own last real success + its own real ttl",
+# that natural offset persists indefinitely rather than resyncing everyone to one shared clock.
 # Must stay close to get_barcode.py/warm_tick.py's vercel.json maxDuration (60s): if Vercel
 # kills a scrape for running too long, nothing releases the lock, so it can only self-heal
 # once its TTL expires. A lock TTL far beyond maxDuration (the old value was 170s) means a
@@ -200,7 +191,8 @@ def resync_warm_schedule_from_cache(account_id, barcode_type, cached):
     if not target:
         return
     now = int(time.time())
-    correct_next_refresh_at = epoch_aligned_next_refresh(target, now)
+    seconds_left = max(0, int(cached.get("seconds_left", 0)))
+    correct_next_refresh_at = now + min(seconds_left, WARM_SUCCESS_INTERVAL)
     existing = get_warm_state(target)
     if int(existing.get("next_refresh_at") or 0) >= correct_next_refresh_at:
         return
@@ -236,10 +228,11 @@ def set_cached_barcode(account_id, number, seconds_left, barcode_type="universe"
         now = int(time.time())
         existing = get_warm_state(target)
         if write_result == "OK":
-            # Staggered to a fixed per-target slot within an 18min epoch-aligned cycle (see
-            # epoch_aligned_next_refresh) so all 6 targets don't come due together - the user
-            # wants at most one barcode stale at a time, never several simultaneously.
-            next_refresh_at = epoch_aligned_next_refresh(target, now)
+            # Based on this fetch's own real remaining validity - never pulled earlier, since
+            # the site won't renew before the real ~20min window is actually up. Staggering
+            # across the 6 targets comes from natural sequential processing (see comment near
+            # WARM_SUCCESS_INTERVAL above), not from forcing this schedule onto a shared clock.
+            next_refresh_at = now + min(ttl, WARM_SUCCESS_INTERVAL)
             set_warm_state(target, {
                 "next_refresh_at": next_refresh_at,
                 "last_success_at": now,
