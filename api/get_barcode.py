@@ -269,32 +269,6 @@ def set_warm_state(target, state):
     redis_command(["SET", warm_state_key(target["id"], target["type"]), json.dumps(state), "EX", 7 * 24 * 60 * 60])
 
 
-def login_state_key(account_id, barcode_type):
-    return f"barcode:loginstate:{normalize_barcode_type(barcode_type)}:{account_id}"
-
-
-def get_login_state(account_id, barcode_type):
-    raw = redis_command(["GET", login_state_key(account_id, barcode_type)])
-    if not raw:
-        return None
-    try:
-        return json.loads(raw)
-    except Exception as exc:
-        print(f"login state parse failed: {exc}", flush=True)
-        return None
-
-
-def set_login_state(account_id, barcode_type, storage_state, login_url):
-    # 3-minute TTL: enough for ~2 warm_tick cron cycles to pick up the follow-up step, but
-    # short enough that a state nobody ever resumes doesn't linger and get reused stale.
-    payload = {"storage_state": storage_state, "login_url": login_url, "saved_at": int(time.time())}
-    redis_command(["SET", login_state_key(account_id, barcode_type), json.dumps(payload), "EX", 180])
-
-
-def clear_login_state(account_id, barcode_type):
-    redis_command(["DEL", login_state_key(account_id, barcode_type)])
-
-
 def select_warm_target(now=None):
     now = int(now or time.time())
     selected = None
@@ -887,23 +861,6 @@ def warm_tick():
         print(f"warm_tick failed for {target['id']}/{target['type']}: {type(exc).__name__}: {exc}", flush=True)
         http_code = 500
         success = False
-    if http_code == 202:
-        # Universe-type step 1 (login page reached, state saved) - neither a success nor a
-        # failure, so don't touch consecutive_failures/last_success_at/last_failure_at. Just
-        # make the target due again immediately so the very next cron tick picks it up for
-        # step 2 while the saved login state is still fresh.
-        release_warm_lock(lock_token)
-        existing = get_warm_state(target)
-        state = dict(existing)
-        state["next_refresh_at"] = now
-        set_warm_state(target, state)
-        return json_response({
-            "status": "pending_step2",
-            "id": target["id"],
-            "type": target["type"],
-            "name": target["name"],
-            "next_refresh_at": state["next_refresh_at"],
-        })
     state = record_warm_result(target, lock_token, success, str(http_code))
     return json_response({
         "status": "done",
@@ -914,16 +871,6 @@ def warm_tick():
         "http_code": http_code,
         "next_refresh_at": state["next_refresh_at"],
     })
-
-
-@app.route("/api/sso_debug", methods=["GET"])
-def sso_debug():
-    universe_ids = sorted({t["id"] for t in WARM_TARGETS if t["type"] == "universe"})
-    out = {}
-    for account_id in universe_ids:
-        raw = redis_command(["GET", f"barcode:ssodebug:{account_id}"])
-        out[account_id] = json.loads(raw) if raw else None
-    return json_response(out)
 
 
 @app.route("/api/warm_status", methods=["GET"])
