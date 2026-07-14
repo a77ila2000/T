@@ -444,9 +444,15 @@
                     placeholder.classList.add('hidden');
                     timerEl.textContent = '';
                 }
-                loader.classList.remove('hidden');
-                buttons.forEach(button => button.disabled = true);
-                statusEl.textContent = options.auto ? `${barcodeTypes[barcodeType]} 자동 갱신 중입니다...` : `${barcodeTypes[barcodeType]}를 실시간으로 생성 중입니다...`;
+                // preserveDisplay means "there's already a valid image showing - this is just a
+                // quiet cache poll (every 30s from refreshVisibleCaches, or on a last_success_at
+                // change), not an actual live scrape". Flashing the loader/"생성 중" message here
+                // made it look like the barcode was being re-scraped every 30s when it never was.
+                if (!preserveDisplay) {
+                    loader.classList.remove('hidden');
+                    buttons.forEach(button => button.disabled = true);
+                    statusEl.textContent = options.auto ? `${barcodeTypes[barcodeType]} 자동 갱신 중입니다...` : `${barcodeTypes[barcodeType]}를 실시간으로 생성 중입니다...`;
+                }
 
                 try {
                     const controller = new AbortController();
