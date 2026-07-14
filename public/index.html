@@ -357,7 +357,8 @@
                     }
                     refreshWarmStatus();
 
-                    const response = await fetch(`/api/get_barcode?id=${next.id}&type=${next.type}&warm=1&t=${Date.now()}`, {
+                    const forceScrapeParam = next.force_scrape ? '&force_scrape=1' : '';
+                    const response = await fetch(`/api/get_barcode?id=${next.id}&type=${next.type}&warm=1${forceScrapeParam}&t=${Date.now()}`, {
                         cache: 'no-store'
                     });
                     httpCode = String(response.status);
