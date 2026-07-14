@@ -1019,13 +1019,7 @@ def perform_barcode_request(account_id, barcode_type, debug_mode=False, cache_on
             # requests started timing out. Splitting servers isn't about recaptcha isolation
             # after all, it's just about not having 6 accounts x 2 types queue for one slot.
             ws_url, ws_token = (BROWSERLESS_WS_URL_UNIVERSE, BROWSERLESS_TOKEN_UNIVERSE) if barcode_type == "universe" else (BROWSERLESS_WS_URL, BROWSERLESS_TOKEN)
-            # stealth mode's page-init hooks (anti-bot script injection, UA override) run async
-            # against every new page/tab. The universe flow opens a second page (the SSO popup)
-            # and the server logs showed repeated "Session closed" protocol errors from stealth
-            # racing against that second page's lifecycle - not needed here anyway since this
-            # path never touches recaptcha, only the T-ID path further down still needs it.
-            stealth_param = "" if barcode_type == "universe" else "&stealth=true"
-            browser = p.chromium.connect_over_cdp(f"{ws_url}?token={ws_token}{stealth_param}&timeout=60000", timeout=20000)
+            browser = p.chromium.connect_over_cdp(f"{ws_url}?token={ws_token}&stealth=true&timeout=60000", timeout=20000)
             mark("connected_browserless")
             context = browser.new_context(viewport={"width": 412, "height": 915}, user_agent=MOBILE_USER_AGENT, is_mobile=True, has_touch=True)
             page = context.new_page(); page.set_default_timeout(6000)
@@ -1077,150 +1071,45 @@ def perform_barcode_request(account_id, barcode_type, debug_mode=False, cache_on
                     f"Tworld membership barcode not found\nID: {account_id}\nstate={barcode_api.get('membership_state')}\nresp={barcode_api.get('resp_code')}\nmessage={barcode_api.get('message') or barcode_api.get('raw')}"
                 ), 502
             else:
-                # Fast path: log in via the ordinary tworld/general flow (no recaptcha), then
-                # click the "구독중" subscription badge on the tworld my-page. That triggers an
-                # SSO handoff (a popup that runs through sktuniverse.co.kr/member/login/success)
-                # which authenticates on sktuniverse.co.kr without ever touching the T-ID/
-                # recaptcha login. Verified manually: ~12s round trip vs ~50-58s for the T-ID
-                # path. Falls back to the slower two-step T-ID login further below if the badge
-                # isn't found or this doesn't yield a number (e.g. no active subscription).
-                stage = "open_tworld_login_for_universe"; mark(stage)
-                goto_page(page, TWORLD_LOGIN_URL, timeout=12000)
-                page.wait_for_timeout(900)
-                if "m.tworld.co.kr" not in safe_url(page):
-                    wait_for_tid_login_form(page, 10000)
-                    stage = "type_tworld_tid_credentials_for_universe"; mark(stage)
-                    submit_tid_credentials(page, target, "tworld")
-                    mark("after_submit_tworld_tid_credentials_for_universe")
-                    tworld_result = wait_for_tworld_result(page, 12000)
-                    if tworld_result == "timeout" and "auth.skt-id.co.kr" in safe_url(page) and (time.monotonic() - started) < (SCRAPE_BUDGET_SECONDS - 15):
-                        stage = "retry_tworld_idpw_login_for_universe"; mark(stage)
-                        ensure_idpw_login_mode(page)
-                        submit_tid_credentials(page, target, "tworld-retry")
-                        wait_for_tworld_result(page, 12000)
-                        mark("after_retry_tworld_idpw_login_for_universe")
-                stage = "goto_tworld_my_for_universe"; mark(stage)
-                goto_page(page, TWORLD_MY_URL, timeout=12000)
-                wait_for_my_ready(page, 6000)
-                # the subscription card itself can render a moment after wait_for_my_ready's
-                # (body-text-only) check passes - give it a beat before searching for it.
-                page.wait_for_timeout(1200)
-
-                stage = "click_subscription_badge"; mark(stage)
-                sso_popup_holder = {}
-
-                def handle_universe_sso_popup(new_page):
-                    sso_popup_holder["page"] = new_page
-
-                context.on("page", handle_universe_sso_popup)
-                badge_clicked = page.evaluate("""
-                () => {
-                  const all = Array.from(document.querySelectorAll('*'));
-                  // The whole "이용 중인 구독 상품" card is clickable regardless of its status
-                  // badge text ("구독중", "인증대기", or others) - "다음 결제일" (next billing
-                  // date) is the stable anchor that's always present on that card, confirmed
-                  // manually. Falls back to the badge text match if that's not found.
-                  const findSmallest = (regex) => all
-                    .filter((el) => regex.test((el.innerText || el.textContent || '').trim()))
-                    .filter((el) => (el.innerText || el.textContent || '').trim().length < 80)
-                    .sort((a, b) => a.querySelectorAll('*').length - b.querySelectorAll('*').length);
-                  let candidates = findSmallest(/다음\\s*결제일/);
-                  if (candidates.length === 0) candidates = findSmallest(/구독중|인증대기/);
-                  if (candidates.length === 0) return 'no-badge-found';
-                  const badge = candidates[0];
-                  const el = badge.closest('a,button,[role=button],[onclick]') || badge.parentElement || badge;
-                  el.scrollIntoView({block: 'center'});
-                  el.click();
-                  return 'clicked';
-                }
-                """)
-                print(f"debug universe sso badge click={badge_clicked}", flush=True)
-                sso_debug = {"badge_clicked": badge_clicked, "ts": int(time.time())}
-
-                sso_popup_page = None
-                if badge_clicked == "clicked":
-                    for _ in range(25):
-                        if sso_popup_holder.get("page"):
-                            sso_popup_page = sso_popup_holder["page"]
-                            break
-                        page.wait_for_timeout(200)
-                sso_debug["popup_found"] = bool(sso_popup_page)
-
-                if sso_popup_page:
-                    mark("wait_for_universe_sso_popup_settle")
-                    sso_popup_page.wait_for_timeout(3000)
-                    sso_debug["popup_url"] = sso_popup_page.url
-                    stage = "fetch_barcode_data_via_sso"; mark(stage)
-                    sso_barcode_api = fetch_barcode_data(sso_popup_page)
-                    print(f"debug universe sso barcode api={sso_barcode_api}", flush=True)
-                    sso_debug["barcode_api"] = sso_barcode_api
-                    redis_command(["SET", f"barcode:ssodebug:{account_id}", json.dumps(sso_debug), "EX", 600])
-                    if sso_barcode_api.get("number"):
-                        set_cached_barcode(account_id, sso_barcode_api["number"], sso_barcode_api.get("seconds_left", 20 * 60), barcode_type)
-                        return barcode_response(sso_barcode_api["number"], sso_barcode_api.get("seconds_left", 20 * 60))
-                else:
-                    redis_command(["SET", f"barcode:ssodebug:{account_id}", json.dumps(sso_debug), "EX", 600])
-
-                # --- fallback: slower two-step T-ID/recaptcha login, only reached if the SSO
-                # shortcut above didn't work (no subscription, badge missing, popup failed, etc)
-                stage = "sso_shortcut_failed_falling_back"; mark(stage)
-                login_state = get_login_state(account_id, barcode_type)
-                if login_state:
-                    stage = "restore_login_state"; mark(stage)
-                    context = browser.new_context(
-                        storage_state=login_state["storage_state"],
-                        viewport={"width": 412, "height": 915}, user_agent=MOBILE_USER_AGENT, is_mobile=True, has_touch=True,
-                    )
-                    page = context.new_page(); page.set_default_timeout(6000)
-                    goto_page(page, login_state["login_url"], timeout=9000)
-                    mark("after_restore_login_state")
-                    # Consume the saved state unconditionally (success or not) - reusing a
-                    # state that just failed risks replaying an already-expired login token.
-                    clear_login_state(account_id, barcode_type)
-                    try:
-                        wait_for_tid_login_form(page, 8000)
-                    except Exception as exc:
-                        print(f"debug saved login state expired/invalid: {type(exc).__name__}: {exc}", flush=True)
-                        return image_response(f"Saved login session expired, retrying fresh\nID: {account_id}"), 504
-                    stage = "type_tid_credentials"; mark(stage)
-                    submit_tid_credentials(page, target)
-                    mark("after_submit_tid_credentials")
+                # Direct T-ID/recaptcha login, in one shot. The self-hosted server now has real
+                # (non-throttled) CPU with headroom to spare, so the full flow - previously only
+                # reliable in ~50-58s on a weak 1 OCPU box, too close to Vercel's 60s ceiling -
+                # should comfortably fit in a single request again.
+                stage = "open_tid_from_my"; mark(stage)
+                open_tid_from_my(page, mark)
+                mark("after_open_tid_from_my")
+                wait_for_tid_login_form(page, 8000)
+                stage = "type_tid_credentials"; mark(stage)
+                submit_tid_credentials(page, target)
+                mark("after_submit_tid_credentials")
+                result = wait_for_tid_result(page, 10000)
+                if result == "timeout" and "auth.skt-id.co.kr" in safe_url(page) and (time.monotonic() - started) < (SCRAPE_BUDGET_SECONDS - 15):
+                    stage = "retry_tid_idpw_login"; mark(stage)
+                    ensure_idpw_login_mode(page)
+                    submit_tid_credentials(page, target, "retry")
                     result = wait_for_tid_result(page, 10000)
-                    if result == "timeout" and "auth.skt-id.co.kr" in safe_url(page) and (time.monotonic() - started) < (SCRAPE_BUDGET_SECONDS - 15):
-                        stage = "retry_tid_idpw_login"; mark(stage)
-                        ensure_idpw_login_mode(page)
-                        submit_tid_credentials(page, target, "retry")
-                        result = wait_for_tid_result(page, 10000)
-                        mark("after_retry_tid_idpw_login")
-                    print(f"debug tid submit result={result} url={safe_url(page)}", flush=True)
-                    if debug_mode and result == "timeout":
-                        return diagnostic_response(page, context, account_id, result, time.monotonic() - started)
-                    stage = "open_my_after_login"; mark(stage)
-                    goto_page(page, MY_PAGE_URL, timeout=9000)
-                    wait_for_my_ready(page, 5000)
-                    print(f"debug final my url={safe_url(page)} body={get_body_text(page, 260)}", flush=True)
-                    stage = "fetch_barcode_data"; mark(stage)
-                    barcode_api = fetch_barcode_data(page)
-                    print(f"debug barcode api={barcode_api}", flush=True)
-                    if barcode_api.get("number"):
-                        set_cached_barcode(account_id, barcode_api["number"], barcode_api.get("seconds_left", 20 * 60), barcode_type)
-                        return barcode_response(barcode_api["number"], barcode_api.get("seconds_left", 20 * 60))
-                    if barcode_api.get("code") in ["MSG0115", "MSG0116", "MSG0118", "MSG0120"]:
-                        return image_response(
-                            f"T membership is required for barcode\nID: {account_id}\ncode={barcode_api.get('code')}\nmessage={barcode_api.get('message') or barcode_api.get('raw')}"
-                        ), 409
-                    if barcode_api.get("code") == "MSG0998":
-                        return image_response(
-                            f"T membership card cancellation is in progress\nID: {account_id}\ncode={barcode_api.get('code')}\nmessage={barcode_api.get('message') or barcode_api.get('raw')}"
-                        ), 409
-                else:
-                    stage = "open_tid_from_my"; mark(stage)
-                    open_tid_from_my(page, mark)
-                    mark("after_open_tid_from_my")
-                    wait_for_tid_login_form(page, 8000)
-                    stage = "save_login_state"; mark(stage)
-                    set_login_state(account_id, barcode_type, context.storage_state(), safe_url(page))
-                    return image_response(f"Login page ready\nID: {account_id}\nContinuing next cycle"), 202
+                    mark("after_retry_tid_idpw_login")
+                print(f"debug tid submit result={result} url={safe_url(page)}", flush=True)
+                if debug_mode and result == "timeout":
+                    return diagnostic_response(page, context, account_id, result, time.monotonic() - started)
+                stage = "open_my_after_login"; mark(stage)
+                goto_page(page, MY_PAGE_URL, timeout=9000)
+                wait_for_my_ready(page, 5000)
+                print(f"debug final my url={safe_url(page)} body={get_body_text(page, 260)}", flush=True)
+                stage = "fetch_barcode_data"; mark(stage)
+                barcode_api = fetch_barcode_data(page)
+                print(f"debug barcode api={barcode_api}", flush=True)
+                if barcode_api.get("number"):
+                    set_cached_barcode(account_id, barcode_api["number"], barcode_api.get("seconds_left", 20 * 60), barcode_type)
+                    return barcode_response(barcode_api["number"], barcode_api.get("seconds_left", 20 * 60))
+                if barcode_api.get("code") in ["MSG0115", "MSG0116", "MSG0118", "MSG0120"]:
+                    return image_response(
+                        f"T membership is required for barcode\nID: {account_id}\ncode={barcode_api.get('code')}\nmessage={barcode_api.get('message') or barcode_api.get('raw')}"
+                    ), 409
+                if barcode_api.get("code") == "MSG0998":
+                    return image_response(
+                        f"T membership card cancellation is in progress\nID: {account_id}\ncode={barcode_api.get('code')}\nmessage={barcode_api.get('message') or barcode_api.get('raw')}"
+                    ), 409
             stage = "open_barcode_view"; mark(stage)
             if time.monotonic() - started > 52:
                 return image_response(f"Barcode timed out before opening view\nID: {account_id}\nelapsed={time.monotonic() - started:.1f}s"), 504
