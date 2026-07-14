@@ -1102,6 +1102,9 @@ def perform_barcode_request(account_id, barcode_type, debug_mode=False, cache_on
                 stage = "goto_tworld_my_for_universe"; mark(stage)
                 goto_page(page, TWORLD_MY_URL, timeout=12000)
                 wait_for_my_ready(page, 6000)
+                # the subscription card itself can render a moment after wait_for_my_ready's
+                # (body-text-only) check passes - give it a beat before searching for it.
+                page.wait_for_timeout(1200)
 
                 stage = "click_subscription_badge"; mark(stage)
                 sso_popup_holder = {}
@@ -1113,12 +1116,16 @@ def perform_barcode_request(account_id, barcode_type, debug_mode=False, cache_on
                 badge_clicked = page.evaluate("""
                 () => {
                   const all = Array.from(document.querySelectorAll('*'));
-                  // "구독중" (subscribed) and "인증대기" (pending verification) badges both
-                  // lead through the same SSO handoff when clicked - confirmed manually.
-                  const candidates = all
-                    .filter((el) => /구독중|인증대기/.test((el.innerText || el.textContent || '').trim()))
-                    .filter((el) => (el.innerText || el.textContent || '').trim().length < 20)
+                  // The whole "이용 중인 구독 상품" card is clickable regardless of its status
+                  // badge text ("구독중", "인증대기", or others) - "다음 결제일" (next billing
+                  // date) is the stable anchor that's always present on that card, confirmed
+                  // manually. Falls back to the badge text match if that's not found.
+                  const findSmallest = (regex) => all
+                    .filter((el) => regex.test((el.innerText || el.textContent || '').trim()))
+                    .filter((el) => (el.innerText || el.textContent || '').trim().length < 80)
                     .sort((a, b) => a.querySelectorAll('*').length - b.querySelectorAll('*').length);
+                  let candidates = findSmallest(/다음\\s*결제일/);
+                  if (candidates.length === 0) candidates = findSmallest(/구독중|인증대기/);
                   if (candidates.length === 0) return 'no-badge-found';
                   const badge = candidates[0];
                   const el = badge.closest('a,button,[role=button],[onclick]') || badge.parentElement || badge;
