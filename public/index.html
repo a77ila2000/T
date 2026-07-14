@@ -10,7 +10,6 @@
     <div class="dashboard">
         <header>
             <h1>T우주 가족 바코드</h1>
-            <div id="warm-status-banner" class="warm-status-banner">자동 갱신 상태를 확인 중입니다</div>
             <div id="warm-status-detail" class="warm-status-detail"></div>
         </header>
 
@@ -134,11 +133,6 @@
                 return `${accountId}:${barcodeType}`;
             }
 
-            function targetLabel(target) {
-                const account = accounts.find(item => item.id === target.id);
-                return `${account ? account.user : target.id} ${barcodeTypes[target.type] || target.type}`;
-            }
-
             function selectBarcodeType(accountId, barcodeType) {
                 const card = document.getElementById(`card-${accountId}`);
                 if (!card || card.dataset.currentType === barcodeType) return;
@@ -234,22 +228,14 @@
                     if (!response.ok) return;
                     const status = await response.json();
                     const current = status.current;
-                    const banner = document.getElementById('warm-status-banner');
                     const dueTargets = (status.targets || [])
                         .map((target, index) => ({ ...target, index }))
                         .filter(target => Number(target.next_refresh_at || 0) <= status.now)
                         .filter(target => !(current && current.id === target.id && current.type === target.type))
                         .sort((a, b) => (a.next_refresh_at - b.next_refresh_at) || (a.index - b.index));
 
-                    if (!current) {
-                        banner.textContent = dueTargets.length
-                            ? `${targetLabel(dueTargets[0])}${dueTargets.length > 1 ? ` 외 ${dueTargets.length - 1}개` : ''} 갱신 필요 - 바로 시작합니다`
-                            : '자동 갱신 대기 중인 바코드가 없습니다';
-                        if (dueTargets.length && !warmWorkerRunning) {
-                            runWarmWorker();
-                        }
-                    } else {
-                        banner.textContent = `${targetLabel(current)} 갱신 중`;
+                    if (!current && dueTargets.length && !warmWorkerRunning) {
+                        runWarmWorker();
                     }
 
                     lastWarmStatusFetch = { status, current, dueTargets, fetchedAtMs: Date.now() };

@@ -144,13 +144,15 @@ On page load:
 - Defaults each card to `universe`.
 - Fetches visible universe cache with `cache_only=1`.
 - Starts `runWarmWorker()`.
-- Polls visible caches every 30 seconds, warm status every 15 seconds.
+- Polls visible caches every 30 seconds, warm status every 5 seconds, and re-renders the live countdown every 1 second from the last polled snapshot.
 - **New**: `visibilitychange` / `pageshow` / `focus` listeners immediately re-run the cache/status/warm-worker checks as soon as the tab becomes visible again, instead of waiting for the next (browser-throttled) interval tick. Background tabs get their `setInterval` timers throttled or paused by the browser, so without this a barcode could finish refreshing server-side minutes before the tab visibly catches up.
 
-Status banner (`#warm-status-banner`):
+Status detail panel (`#warm-status-detail`):
 
-- Shows current refresh target as `{name} {barcode type} 갱신 중`.
-- If due targets exist but no current lock, shows `{target} 갱신 필요 - 바로 시작합니다` and immediately calls `runWarmWorker()`.
+- One row per person (나/어머니/아버지), each showing 우주 and 일반 side by side.
+- Each value is one of: `갱신 중` (this is the active warm-lock target), `대기 N번째` (due and queued behind N-1 other due targets), a live `M:SS 남음` countdown ticking client-side between polls, or `만료됨` (briefly, only in the gap between the client's own countdown hitting 0 and the next server poll confirming it's due/queued).
+- If due targets exist but no current lock, `refreshWarmStatus()` immediately calls `runWarmWorker()` itself (no visible banner - this is silent/functional only).
+- The old single-line `#warm-status-banner` above this panel was removed as redundant - the per-person panel already shows the same active/queued/expired state per target, with more detail.
 
 Per-card status (added this session):
 
