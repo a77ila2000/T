@@ -69,6 +69,7 @@
             let queueRunning = false;
             let warmWorkerRunning = false;
             let lastWarmStatusFetch = null;
+            const lastKnownSuccessAt = {};
 
             accounts.forEach(account => {
                 const card = document.createElement('div');
@@ -237,6 +238,26 @@
                     if (!current && dueTargets.length && !warmWorkerRunning) {
                         runWarmWorker();
                     }
+
+                    // The status panel polls every 5s, but the visible barcode image only
+                    // re-fetches every 30s (refreshVisibleCaches) - so a refresh could finish
+                    // (panel shows a fresh countdown) while the displayed image is still the
+                    // old one for up to 30s. Detecting last_success_at moving forward here and
+                    // immediately re-fetching closes that gap down to ~5s, and crucially also
+                    // covers refreshes triggered externally by cron-job.org's warm_tick (not
+                    // just ones this tab's own runWarmWorker happened to drive).
+                    (status.targets || []).forEach(target => {
+                        const key = `${target.id}:${target.type}`;
+                        const previousSuccessAt = lastKnownSuccessAt[key];
+                        const currentSuccessAt = Number(target.last_success_at || 0);
+                        if (previousSuccessAt !== undefined && currentSuccessAt > previousSuccessAt) {
+                            const card = document.getElementById(`card-${target.id}`);
+                            if (card && card.dataset.currentType === target.type && !fetchingCards.has(target.id)) {
+                                fetchBarcode(target.id, target.type, { cacheOnly: true, preserveDisplay: false, quietMiss: true });
+                            }
+                        }
+                        lastKnownSuccessAt[key] = currentSuccessAt;
+                    });
 
                     lastWarmStatusFetch = { status, current, dueTargets, fetchedAtMs: Date.now() };
                     renderWarmStatusDetail();
