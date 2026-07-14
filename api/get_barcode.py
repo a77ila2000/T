@@ -1019,7 +1019,13 @@ def perform_barcode_request(account_id, barcode_type, debug_mode=False, cache_on
             # requests started timing out. Splitting servers isn't about recaptcha isolation
             # after all, it's just about not having 6 accounts x 2 types queue for one slot.
             ws_url, ws_token = (BROWSERLESS_WS_URL_UNIVERSE, BROWSERLESS_TOKEN_UNIVERSE) if barcode_type == "universe" else (BROWSERLESS_WS_URL, BROWSERLESS_TOKEN)
-            browser = p.chromium.connect_over_cdp(f"{ws_url}?token={ws_token}&stealth=true&timeout=60000", timeout=20000)
+            # stealth mode's page-init hooks (anti-bot script injection, UA override) run async
+            # against every new page/tab. The universe flow opens a second page (the SSO popup)
+            # and the server logs showed repeated "Session closed" protocol errors from stealth
+            # racing against that second page's lifecycle - not needed here anyway since this
+            # path never touches recaptcha, only the T-ID path further down still needs it.
+            stealth_param = "" if barcode_type == "universe" else "&stealth=true"
+            browser = p.chromium.connect_over_cdp(f"{ws_url}?token={ws_token}{stealth_param}&timeout=60000", timeout=20000)
             mark("connected_browserless")
             context = browser.new_context(viewport={"width": 412, "height": 915}, user_agent=MOBILE_USER_AGENT, is_mobile=True, has_touch=True)
             page = context.new_page(); page.set_default_timeout(6000)
