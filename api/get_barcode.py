@@ -32,6 +32,24 @@ WARM_TARGETS = [
 ]
 WARM_SUCCESS_INTERVAL = 20 * 60
 WARM_FAIL_INTERVAL = 30
+# Real barcodes are valid ~20 minutes; splitting that into one evenly-spaced slot per target
+# (anchored to absolute epoch time, not "now + remaining") guarantees at most one target is
+# ever due at once, so the app's 6 barcodes don't all go stale together. The cycle is shorter
+# than the real ~20min TTL (2min margin) so a target's assigned slot always lands before its
+# cache would actually expire. This must be idempotent (same target + same now -> same slot)
+# so it works identically whether called from a real refresh or the cache-hit resync path.
+WARM_STAGGER_CYCLE_SECONDS = 18 * 60
+
+
+def epoch_aligned_next_refresh(target, now):
+    index = next((i for i, t in enumerate(WARM_TARGETS) if t["id"] == target["id"] and t["type"] == target["type"]), 0)
+    slot_width = WARM_STAGGER_CYCLE_SECONDS // len(WARM_TARGETS)
+    offset = index * slot_width
+    cycle_start = (now // WARM_STAGGER_CYCLE_SECONDS) * WARM_STAGGER_CYCLE_SECONDS
+    due = cycle_start + offset
+    if due <= now:
+        due += WARM_STAGGER_CYCLE_SECONDS
+    return due
 # Must stay close to get_barcode.py/warm_tick.py's vercel.json maxDuration (60s): if Vercel
 # kills a scrape for running too long, nothing releases the lock, so it can only self-heal
 # once its TTL expires. A lock TTL far beyond maxDuration (the old value was 170s) means a
@@ -182,8 +200,7 @@ def resync_warm_schedule_from_cache(account_id, barcode_type, cached):
     if not target:
         return
     now = int(time.time())
-    seconds_left = max(0, int(cached.get("seconds_left", 0)))
-    correct_next_refresh_at = now + min(seconds_left, WARM_SUCCESS_INTERVAL)
+    correct_next_refresh_at = epoch_aligned_next_refresh(target, now)
     existing = get_warm_state(target)
     if int(existing.get("next_refresh_at") or 0) >= correct_next_refresh_at:
         return
@@ -219,14 +236,10 @@ def set_cached_barcode(account_id, number, seconds_left, barcode_type="universe"
         now = int(time.time())
         existing = get_warm_state(target)
         if write_result == "OK":
-            # Deliberately NOT staggered against the sibling barcode type here. Pulling this
-            # schedule earlier than the real ttl doesn't force an earlier real refresh anyway -
-            # perform_barcode_request short-circuits to the still-valid cache whenever it's
-            # invoked before the barcode actually goes stale, so an earlier-than-necessary
-            # next_refresh_at just produces a no-op cache-hit cycle. Real staggering only
-            # matters once a barcode is genuinely due, which resync_warm_schedule_from_cache
-            # below handles by re-syncing to the barcode's actual remaining validity.
-            next_refresh_at = now + min(ttl, WARM_SUCCESS_INTERVAL)
+            # Staggered to a fixed per-target slot within an 18min epoch-aligned cycle (see
+            # epoch_aligned_next_refresh) so all 6 targets don't come due together - the user
+            # wants at most one barcode stale at a time, never several simultaneously.
+            next_refresh_at = epoch_aligned_next_refresh(target, now)
             set_warm_state(target, {
                 "next_refresh_at": next_refresh_at,
                 "last_success_at": now,
