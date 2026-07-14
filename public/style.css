@@ -31,7 +31,7 @@ header h1 {
 }
 
 .warm-status-banner {
-    margin: 0 auto 1.5rem;
+    margin: 0 auto 0.75rem;
     padding: 0.65rem 0.85rem;
     border-radius: 8px;
     background-color: #ffffff;
@@ -39,6 +39,55 @@ header h1 {
     color: var(--text-light);
     font-size: 0.92rem;
     text-align: center;
+}
+
+.warm-status-detail {
+    margin: 0 auto 1.5rem;
+    padding: 0.4rem 0.85rem;
+    border-radius: 8px;
+    background-color: #ffffff;
+    border: 1px solid var(--border-color);
+    font-size: 0.85rem;
+}
+
+.warm-status-detail .row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 0.4rem 0;
+    border-bottom: 1px solid var(--border-color);
+}
+
+.warm-status-detail .row:last-child {
+    border-bottom: none;
+}
+
+.warm-status-detail .label {
+    color: var(--text-color);
+    font-weight: 500;
+}
+
+.warm-status-detail .value {
+    color: var(--text-light);
+}
+
+.warm-status-detail .value.fresh {
+    color: #2e7d32;
+}
+
+.warm-status-detail .value.stale {
+    color: #c62828;
+    font-weight: 600;
+}
+
+.warm-status-detail .value.active {
+    color: #1565c0;
+    font-weight: 600;
+}
+
+.warm-status-detail .value.queued {
+    color: #ef6c00;
+    font-weight: 600;
 }
 
 .card {
