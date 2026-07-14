@@ -69,6 +69,7 @@
             const fetchingCards = new Set();
             let queueRunning = false;
             let warmWorkerRunning = false;
+            let lastWarmStatusFetch = null;
 
             accounts.forEach(account => {
                 const card = document.createElement('div');
@@ -116,7 +117,8 @@
             refreshWarmStatus();
             setInterval(runWarmWorker, CLIENT_WARM_INTERVAL_MS);
             setInterval(refreshVisibleCaches, CACHE_REFRESH_INTERVAL_MS);
-            setInterval(refreshWarmStatus, 15 * 1000);
+            setInterval(refreshWarmStatus, 5 * 1000);
+            setInterval(renderWarmStatusDetail, 1000);
 
             function catchUpAfterHidden() {
                 if (document.hidden) return;
@@ -250,7 +252,8 @@
                         banner.textContent = `${targetLabel(current)} 갱신 중`;
                     }
 
-                    renderWarmStatusDetail(status, current, dueTargets);
+                    lastWarmStatusFetch = { status, current, dueTargets, fetchedAtMs: Date.now() };
+                    renderWarmStatusDetail();
 
                     accounts.forEach(account => {
                         if (fetchingCards.has(account.id)) return;
@@ -305,29 +308,47 @@
                 return `${m}:${String(s).padStart(2, '0')} 남음`;
             }
 
-            function renderWarmStatusDetail(status, current, dueTargets) {
+            function targetStatusFor(target, current, dueTargets, elapsedSec) {
+                const isActive = Boolean(current && current.id === target.id && current.type === target.type);
+                const queuePosition = dueTargets.findIndex(t => t.id === target.id && t.type === target.type);
+                if (isActive) {
+                    return { valueText: '갱신 중', valueClass: 'active' };
+                }
+                if (queuePosition !== -1) {
+                    return { valueText: `대기 ${queuePosition + 1}번째`, valueClass: 'queued' };
+                }
+                // Countdown client-side between server polls so the display ticks every
+                // second instead of only updating on the next ~5s warm_status refresh.
+                const remaining = Math.max(0, Number(target.seconds_left || 0) - elapsedSec);
+                if (remaining <= 0) {
+                    return { valueText: '만료됨', valueClass: 'stale' };
+                }
+                return { valueText: formatSecondsLeft(remaining), valueClass: 'fresh' };
+            }
+
+            function renderWarmStatusDetail() {
                 const detail = document.getElementById('warm-status-detail');
-                if (!detail) return;
-                const rows = (status.targets || []).map(target => {
-                    const label = targetLabel(target);
-                    const isActive = Boolean(current && current.id === target.id && current.type === target.type);
-                    const queuePosition = dueTargets.findIndex(t => t.id === target.id && t.type === target.type);
-                    let valueText;
-                    let valueClass;
-                    if (isActive) {
-                        valueText = '갱신 중';
-                        valueClass = 'active';
-                    } else if (queuePosition !== -1) {
-                        valueText = `대기열 ${queuePosition + 1}번째`;
-                        valueClass = 'queued';
-                    } else if (target.stale || !(target.seconds_left > 0)) {
-                        valueText = '만료됨';
-                        valueClass = 'stale';
-                    } else {
-                        valueText = formatSecondsLeft(target.seconds_left);
-                        valueClass = 'fresh';
-                    }
-                    return `<div class="row"><span class="label">${label}</span><span class="value ${valueClass}">${valueText}</span></div>`;
+                if (!detail || !lastWarmStatusFetch) return;
+                const { status, current, dueTargets, fetchedAtMs } = lastWarmStatusFetch;
+                const elapsedSec = Math.max(0, Math.floor((Date.now() - fetchedAtMs) / 1000));
+
+                const byAccount = {};
+                (status.targets || []).forEach(target => {
+                    if (!byAccount[target.id]) byAccount[target.id] = {};
+                    byAccount[target.id][target.type] = targetStatusFor(target, current, dueTargets, elapsedSec);
+                });
+
+                const rows = accounts.map(account => {
+                    const entry = byAccount[account.id] || {};
+                    const uni = entry.universe || { valueText: '-', valueClass: '' };
+                    const gen = entry.general || { valueText: '-', valueClass: '' };
+                    return `<div class="row">
+                        <span class="label">${account.user}</span>
+                        <span class="value-group">
+                            <span class="value-item"><span class="value-type">우주</span><span class="value ${uni.valueClass}">${uni.valueText}</span></span>
+                            <span class="value-item"><span class="value-type">일반</span><span class="value ${gen.valueClass}">${gen.valueText}</span></span>
+                        </span>
+                    </div>`;
                 }).join('');
                 detail.innerHTML = rows;
             }

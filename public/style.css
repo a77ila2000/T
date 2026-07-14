@@ -65,6 +65,24 @@ header h1 {
 .warm-status-detail .label {
     color: var(--text-color);
     font-weight: 500;
+    flex-shrink: 0;
+}
+
+.warm-status-detail .value-group {
+    display: flex;
+    gap: 1rem;
+}
+
+.warm-status-detail .value-item {
+    display: flex;
+    align-items: baseline;
+    gap: 0.3rem;
+    white-space: nowrap;
+}
+
+.warm-status-detail .value-type {
+    color: var(--text-light);
+    font-size: 0.78rem;
 }
 
 .warm-status-detail .value {
