@@ -47,18 +47,6 @@ WARM_FAIL_INTERVAL = 30
 # single killed attempt can block every other target for minutes.
 WARM_LOCK_TTL = 75
 WARM_CURRENT_TTL = 90
-# Confirmed empirically (2026-07-14): universe and general share ONE rotation clock per
-# account on the site's side - fetching either endpoint just reports how much time is left
-# on the account's current cycle, not "20 fresh minutes from whenever we happened to ask".
-# So a plain on-time scrape always spends its ~20-35s login/navigation AFTER the real expiry
-# has already passed, meaning the barcode is genuinely stale for that whole login duration.
-# To shrink that window, warm_next/warm_tick may pick a target up to this many seconds BEFORE
-# its real next_refresh_at (see select_warm_target) - the login/navigation happens early while
-# the old barcode is still technically valid, and once on the my-page, if the value read back
-# still looks like the tail end of the old cycle, poll_for_fresh_barcode() waits it out in
-# place (no re-login needed) until the real rotation happens. This does NOT increase scrape
-# frequency - it's still one attempt per ~20min cycle, just started slightly earlier.
-WARM_EARLY_LOGIN_LEAD_SECONDS = 20
 LAST_BARCODE_RETENTION = 7 * 24 * 60 * 60
 # Vercel Runtime Timeout Error logs showed /api/warm_tick hitting the platform's own 60s
 # maxDuration and getting killed outright - which skips our except/finally entirely, so
@@ -281,10 +269,7 @@ def set_warm_state(target, state):
     redis_command(["SET", warm_state_key(target["id"], target["type"]), json.dumps(state), "EX", 7 * 24 * 60 * 60])
 
 
-def select_warm_target(now=None, lead_seconds=WARM_EARLY_LOGIN_LEAD_SECONDS):
-    # lead_seconds lets a target be picked up slightly before its real next_refresh_at (see
-    # WARM_EARLY_LOGIN_LEAD_SECONDS above). Actually-overdue targets (due_at <= now) always
-    # win over early-lead ones (due_at in (now, now+lead_seconds]) since they compare smaller.
+def select_warm_target(now=None):
     now = int(now or time.time())
     selected = None
     selected_state = None
@@ -292,7 +277,7 @@ def select_warm_target(now=None, lead_seconds=WARM_EARLY_LOGIN_LEAD_SECONDS):
     for index, target in enumerate(WARM_TARGETS):
         state = get_warm_state(target)
         due_at = int(state.get("next_refresh_at") or 0)
-        if due_at > now + lead_seconds:
+        if due_at > now:
             continue
         if selected is None or due_at < selected_due or (due_at == selected_due and index < selected.get("index", 0)):
             selected = dict(target, index=index)
@@ -803,7 +788,6 @@ def warm_next():
         "type": target["type"],
         "name": target["name"],
         "next_refresh_at": int(state.get("next_refresh_at") or 0),
-        "force_scrape": int(state.get("next_refresh_at") or 0) > now,
     })
 
 
@@ -854,11 +838,10 @@ def warm_tick():
     lock_token = acquire_warm_lock()
     if not lock_token:
         return json_response({"status": "locked", "retry_after": 60})
-    target, state = select_warm_target(now)
+    target, _ = select_warm_target(now)
     if not target:
         release_warm_lock(lock_token)
         return json_response({"status": "no_due", "now": now})
-    is_early = int(state.get("next_refresh_at") or 0) > now
     redis_command(["SET", warm_current_key(), json.dumps({
         "token": lock_token,
         "started_at": now,
@@ -867,7 +850,7 @@ def warm_tick():
         "name": target["name"],
     }), "EX", WARM_CURRENT_TTL])
     try:
-        result = perform_barcode_request(target["id"], target["type"], force_scrape=is_early)
+        result = perform_barcode_request(target["id"], target["type"])
         if isinstance(result, tuple):
             body, http_code = result[0], result[1]
         else:
@@ -925,29 +908,11 @@ def handler():
         return "Account ID is required.", 400
     debug_mode = request.args.get("debug") == "1"
     cache_only = request.args.get("cache_only") == "1"
-    force_scrape = request.args.get("force_scrape") == "1"
     barcode_type = normalize_barcode_type(request.args.get("type"))
-    return perform_barcode_request(account_id, barcode_type, debug_mode=debug_mode, cache_only=cache_only, force_scrape=force_scrape)
+    return perform_barcode_request(account_id, barcode_type, debug_mode=debug_mode, cache_only=cache_only)
 
 
-def poll_for_fresh_barcode(fetch_fn, page, mark, started, initial, min_fresh_seconds=300, poll_interval_ms=2000):
-    # Only called for a deliberately early warm attempt (force_scrape=True, see
-    # WARM_EARLY_LOGIN_LEAD_SECONDS): the login/navigation already happened before the real
-    # expiry, so `initial` may still be the tail end of the OLD cycle (small seconds_left).
-    # Poll the same already-authenticated page in place - no new login needed - until the
-    # site's shared per-account clock actually rotates (seconds_left jumps back up) or the
-    # scrape budget runs out, whichever comes first. Falls back to whatever was last read if
-    # the budget runs out, same as today's behavior - no correctness regression either way.
-    result = initial
-    deadline = started + SCRAPE_BUDGET_SECONDS - 6
-    while result.get("number") and int(result.get("seconds_left") or 0) < min_fresh_seconds and time.monotonic() < deadline:
-        page.wait_for_timeout(poll_interval_ms)
-        mark("poll_for_rotation")
-        result = fetch_fn(page)
-    return result
-
-
-def perform_barcode_request(account_id, barcode_type, debug_mode=False, cache_only=False, force_scrape=False):
+def perform_barcode_request(account_id, barcode_type, debug_mode=False, cache_only=False):
     browser = None
     lock_token = None
     stage = "start"
@@ -978,7 +943,7 @@ def perform_barcode_request(account_id, barcode_type, debug_mode=False, cache_on
         if not target:
             return f"Account not found: {account_id}", 404
         cached = get_cached_barcode(account_id, barcode_type)
-        if not debug_mode and cached and not force_scrape:
+        if not debug_mode and cached:
             resync_warm_schedule_from_cache(account_id, barcode_type, cached)
             return barcode_response(cached["number"], cached.get("seconds_left", 0), cached.get("grade", ""), cached.get("stale", False))
         if cache_only:
@@ -1043,8 +1008,6 @@ def perform_barcode_request(account_id, barcode_type, debug_mode=False, cache_on
                 print(f"debug final tworld url={safe_url(page)} body={get_body_text(page, 260)}", flush=True)
                 stage = "fetch_tworld_membership_data"; mark(stage)
                 barcode_api = fetch_tworld_membership_data(page)
-                if force_scrape:
-                    barcode_api = poll_for_fresh_barcode(fetch_tworld_membership_data, page, mark, started, barcode_api)
                 print(f"debug tworld membership api={barcode_api}", flush=True)
                 if barcode_api.get("number"):
                     grade = barcode_api.get("grade") or extract_membership_grade(page)
@@ -1088,8 +1051,6 @@ def perform_barcode_request(account_id, barcode_type, debug_mode=False, cache_on
                 print(f"debug final my url={safe_url(page)} body={get_body_text(page, 260)}", flush=True)
                 stage = "fetch_barcode_data"; mark(stage)
                 barcode_api = fetch_barcode_data(page)
-                if force_scrape:
-                    barcode_api = poll_for_fresh_barcode(fetch_barcode_data, page, mark, started, barcode_api)
                 print(f"debug barcode api={barcode_api}", flush=True)
                 if barcode_api.get("number"):
                     set_cached_barcode(account_id, barcode_api["number"], barcode_api.get("seconds_left", 20 * 60), barcode_type)
