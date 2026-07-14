@@ -7,12 +7,12 @@ app = Flask(__name__)
 ENCRYPTION_KEY_B64 = os.environ.get("ENCRYPTION_KEY")
 ENCRYPTED_ACCOUNTS_B64 = os.environ.get("ENCRYPTED_ACCOUNTS")
 BROWSERLESS_TOKEN = os.environ.get("BROWSERLESS_TOKEN", "")
-BROWSERLESS_WS_URL = os.environ.get("BROWSERLESS_WS_URL", "ws://193.123.162.16:3000")
-# universe-type scrapes (T ID + recaptcha) run on a second self-hosted instance so they
-# don't queue behind general-type scrapes on the same CONCURRENT=1 browserless server -
-# that queueing was itself burning through the request's time budget.
-BROWSERLESS_WS_URL_UNIVERSE = os.environ.get("BROWSERLESS_WS_URL_UNIVERSE", "ws://152.70.97.173:3000")
-BROWSERLESS_TOKEN_UNIVERSE = os.environ.get("BROWSERLESS_TOKEN_UNIVERSE", "")
+# Moved to a single, much more capable self-hosted instance (Oracle ARM A1.Flex, 2 OCPU/12GB
+# vs. the old 1 OCPU/1GB AMD micro boxes) - CONCURRENT=2 on this box means general and
+# universe no longer need separate dedicated servers to avoid queueing each other out.
+BROWSERLESS_WS_URL = os.environ.get("BROWSERLESS_WS_URL", "ws://168.138.194.2:3000")
+BROWSERLESS_WS_URL_UNIVERSE = os.environ.get("BROWSERLESS_WS_URL_UNIVERSE", BROWSERLESS_WS_URL)
+BROWSERLESS_TOKEN_UNIVERSE = os.environ.get("BROWSERLESS_TOKEN_UNIVERSE", BROWSERLESS_TOKEN)
 UPSTASH_REDIS_REST_URL = os.environ.get("UPSTASH_REDIS_REST_URL", "").rstrip("/")
 UPSTASH_REDIS_REST_TOKEN = os.environ.get("UPSTASH_REDIS_REST_TOKEN", "")
 MY_PAGE_URL = "https://m.sktuniverse.co.kr/my"
