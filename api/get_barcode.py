@@ -82,14 +82,16 @@ SCRAPE_BUDGET_SECONDS = 50
 # attempting a second login for (general's own login is ~15-25s) - below that, chaining
 # would likely just time out mid-flight and waste the browser lock, so it's skipped and the
 # sibling falls back to the next external trigger, same as before this change.
-WARM_TICK_OVERALL_DEADLINE_SECONDS = 57
+WARM_TICK_OVERALL_DEADLINE_SECONDS = 56
 # 25s was too conservative in practice - a real universe early-lead attempt (with polling)
 # observed taking ~31s left only ~24s of the 55s deadline, missing the old 25s bar by 1s and
-# skipping the chain entirely. Lowered along with raising the deadline above (55->57) to
-# actually leave room for the common case, at the cost of a slightly tighter fit for general's
-# own login on the rare slower attempt - which just falls back to a normal failure/retry on
-# the next external trigger, no worse than before this feature existed.
-WARM_CHAIN_MIN_BUDGET_SECONDS = 18
+# skipping the chain entirely. 18s (tried next) was too loose the other way - a chained
+# general attempt with that little budget likely hit its own ScrapeTimeout, which (combined
+# with a separate bug in the browser-lock-busy fallback, since fixed - see
+# "X-Barcode-Fallback" below) produced a retry storm. 22s is the middle ground: enough for
+# general's typical ~15-25s login most of the time, without inviting a timeout on the
+# common case.
+WARM_CHAIN_MIN_BUDGET_SECONDS = 22
 
 
 class ScrapeTimeout(Exception):
@@ -875,7 +877,11 @@ def warm_tick():
             else:
                 body, http_code = result, getattr(result, "status_code", 200)
             content_type = getattr(body, "mimetype", "") or ""
-            success = http_code == 200 and content_type.startswith("image/")
+            is_fallback = bool(getattr(body, "headers", None) and body.headers.get("X-Barcode-Fallback"))
+            # A lock-busy fallback re-served the old cache instead of actually scraping -
+            # count it as a failure so the normal backoff (compute_failure_retry_delay)
+            # kicks in on repeat contention, instead of retrying every few seconds forever.
+            success = http_code == 200 and content_type.startswith("image/") and not is_fallback
         except Exception as exc:
             print(f"warm_tick failed for {current_target['id']}/{current_target['type']}: {type(exc).__name__}: {exc}", flush=True)
             http_code = 500
@@ -1060,7 +1066,19 @@ def perform_barcode_request(account_id, barcode_type, debug_mode=False, cache_on
             cached = get_cached_barcode(account_id, barcode_type, allow_stale=True)
             if not debug_mode and cached:
                 resync_warm_schedule_from_cache(account_id, barcode_type, cached)
-                return barcode_response(cached["number"], cached.get("seconds_left", 0), cached.get("grade", ""), cached.get("stale", False), cached.get("stale_seconds", 0))
+                # X-Barcode-Fallback tells warm_tick this wasn't a real scrape attempt (the
+                # browser lock was busy - probably another target's chained scrape still
+                # running) - just re-serving whatever was cached. Without this marker,
+                # warm_tick's naive "200 + image content-type = success" check treated this
+                # the same as a genuine fresh refresh, which (a) never actually renewed a
+                # stale barcode and (b) crucially never touched last_failure_at/
+                # consecutive_failures, so nothing throttled the retry - observed causing a
+                # sub-second-interval retry storm once the early-login-lead chaining
+                # (WARM_TICK_OVERALL_DEADLINE_SECONDS) started landing two scrapes close
+                # enough together to make lock contention here common instead of rare.
+                resp = barcode_response(cached["number"], cached.get("seconds_left", 0), cached.get("grade", ""), cached.get("stale", False), cached.get("stale_seconds", 0))
+                resp.headers["X-Barcode-Fallback"] = "lock-busy"
+                return resp
             resp = image_response(f"Another barcode refresh is already running\nID: {account_id}\nRetry shortly", color=(255, 248, 225))
             resp.status_code = 423
             resp.headers["Retry-After"] = "75"
