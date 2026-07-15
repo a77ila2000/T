@@ -124,7 +124,10 @@
             refreshWarmStatus();
             setInterval(runWarmWorker, CLIENT_WARM_INTERVAL_MS);
             setInterval(refreshWarmStatus, 5 * 1000);
-            setInterval(renderWarmStatusDetail, 1000);
+            setInterval(() => {
+                renderWarmStatusDetail();
+                updateVisibleCardTimers();
+            }, 1000);
 
             let catchUpTimer = null;
             function catchUpAfterHidden() {
@@ -243,6 +246,7 @@
 
                     lastWarmStatusFetch = { status, current, dueTargets, fetchedAtMs: Date.now() };
                     renderWarmStatusDetail();
+                    updateVisibleCardTimers();
 
                     accounts.forEach(account => {
                         if (fetchingCards.has(account.id)) return;
@@ -347,6 +351,32 @@
                     </div>`;
                 }).join('');
                 detail.innerHTML = rows;
+            }
+
+            function updateVisibleCardTimers() {
+                // Keeps each card's own "만료됨 (M:SS 경과)" timer perfectly in sync with the
+                // status panel above, by computing it from the exact same warm_status snapshot
+                // and formula (targetStatusFor draws from lastWarmStatusFetch too) - they used
+                // to be two independently-seeded timers (this one seeded once from whatever
+                // fetchBarcode's own response happened to say, then ticking on its own), which
+                // drifted apart by a few seconds since each was based on a different poll.
+                if (!lastWarmStatusFetch) return;
+                const { status, fetchedAtMs } = lastWarmStatusFetch;
+                const elapsedSec = Math.max(0, Math.floor((Date.now() - fetchedAtMs) / 1000));
+                accounts.forEach(account => {
+                    const card = document.getElementById(`card-${account.id}`);
+                    if (!card) return;
+                    const img = card.querySelector(`img[data-id="${account.id}"]`);
+                    if (!img || img.dataset.stale !== '1') return;
+                    const barcodeType = card.dataset.currentType || 'universe';
+                    const target = (status.targets || []).find(t => t.id === account.id && t.type === barcodeType);
+                    if (!target) return;
+                    const remaining = Number(target.seconds_left || 0) - elapsedSec;
+                    if (remaining > 0) return;
+                    const staleFor = Number(target.stale_seconds || 0) + elapsedSec - Number(target.seconds_left || 0);
+                    const timerEl = card.querySelector('.timer');
+                    timerEl.textContent = `만료됨 (${formatMinSec(staleFor)} 경과)`;
+                });
             }
 
             async function runWarmWorker() {
@@ -491,7 +521,11 @@
                     placeholder.classList.add('hidden');
                     loader.classList.add('hidden');
                     if (isStale) {
-                        startStaleTimer(accountId, barcodeType, staleSeconds);
+                        // Set an immediate value from this response so there's no blank/stale
+                        // text before the next tick; updateVisibleCardTimers() (driven by the
+                        // same warm_status polling as the status panel above) takes over the
+                        // continuous ticking from here, so the two never drift apart.
+                        timerEl.textContent = `만료됨 (${formatMinSec(staleSeconds)} 경과)`;
                         statusEl.textContent = barcodeNumber
                             ? `마지막 ${barcodeTypes[barcodeType]}를 표시 중입니다. 순차 갱신 대기 중입니다. (${barcodeNumber})`
                             : `마지막 ${barcodeTypes[barcodeType]}를 표시 중입니다. 순차 갱신 대기 중입니다.`;
@@ -550,28 +584,6 @@
                 img.dataset.timerId = timerId.toString();
             }
 
-            function startStaleTimer(accountId, barcodeType, initialStaleSeconds) {
-                const card = document.getElementById(`card-${accountId}`);
-                const img = card.querySelector(`img[data-id="${accountId}"]`);
-                const timerEl = card.querySelector('.timer');
-
-                let staleFor = Math.max(0, initialStaleSeconds);
-
-                const updateTimer = () => {
-                    if (card.dataset.currentType !== barcodeType) {
-                        clearInterval(timerId);
-                        return;
-                    }
-                    const minutes = Math.floor(staleFor / 60);
-                    const seconds = staleFor % 60;
-                    timerEl.textContent = `만료됨 (${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')} 경과)`;
-                    staleFor += 1;
-                };
-
-                updateTimer();
-                const timerId = setInterval(updateTimer, 1000);
-                img.dataset.timerId = timerId.toString();
-            }
         });
     </script>
 </body>
