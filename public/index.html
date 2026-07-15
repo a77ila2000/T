@@ -62,10 +62,15 @@
             const cardContainer = document.getElementById('card-container');
             const BARCODE_VALID_TIME = 20 * 60;
             const CLIENT_WARM_INTERVAL_MS = 3 * 60 * 1000;
-            const CACHE_REFRESH_INTERVAL_MS = 30 * 1000;
             const refreshQueue = [];
             const queuedKeys = new Set();
             const fetchingCards = new Set();
+            // Separate from fetchingCards above (which is keyed by accountId alone, and only
+            // used to skip clobbering status text during a poll) - this one is keyed by
+            // "accountId:type" and is a real duplicate-request guard: without it, two nearly-
+            // simultaneous triggers for the same account+type (e.g. a tab regaining focus
+            // right as the 5s status poll also fires) would both fire actual HTTP requests.
+            const inFlightFetches = new Set();
             let queueRunning = false;
             let warmWorkerRunning = false;
             let lastWarmStatusFetch = null;
@@ -109,22 +114,34 @@
                 });
             });
 
-            accounts.forEach(account => {
-                fetchBarcode(account.id, 'universe', { cacheOnly: true, preserveDisplay: true });
-            });
+            // One-time initial load of the visible barcode images. The recurring 30s
+            // refreshVisibleCaches() poll that used to run alongside this was removed -
+            // refreshWarmStatus()'s last_success_at watcher (every 5s) already re-fetches
+            // the image the moment a refresh actually completes, so the 30s poll was pure
+            // redundant traffic. This call and the accounts.forEach(fetchBarcode...) loop
+            // that used to run right before it were also duplicates of each other (both
+            // fetched the same default-universe cache for all three accounts at page load);
+            // this single call covers it.
             runWarmWorker();
             refreshVisibleCaches();
             refreshWarmStatus();
             setInterval(runWarmWorker, CLIENT_WARM_INTERVAL_MS);
-            setInterval(refreshVisibleCaches, CACHE_REFRESH_INTERVAL_MS);
             setInterval(refreshWarmStatus, 5 * 1000);
             setInterval(renderWarmStatusDetail, 1000);
 
+            let catchUpTimer = null;
             function catchUpAfterHidden() {
                 if (document.hidden) return;
-                refreshVisibleCaches();
-                refreshWarmStatus();
-                runWarmWorker();
+                // visibilitychange/pageshow/focus can fire within milliseconds of each other
+                // on the same real "tab became active again" event - debounce so that burst
+                // triggers one catch-up pass, not three.
+                if (catchUpTimer) return;
+                catchUpTimer = setTimeout(() => {
+                    catchUpTimer = null;
+                    refreshVisibleCaches();
+                    refreshWarmStatus();
+                    runWarmWorker();
+                }, 350);
             }
             document.addEventListener('visibilitychange', catchUpAfterHidden);
             window.addEventListener('pageshow', catchUpAfterHidden);
@@ -235,13 +252,11 @@
                         runWarmWorker();
                     }
 
-                    // The status panel polls every 5s, but the visible barcode image only
-                    // re-fetches every 30s (refreshVisibleCaches) - so a refresh could finish
-                    // (panel shows a fresh countdown) while the displayed image is still the
-                    // old one for up to 30s. Detecting last_success_at moving forward here and
-                    // immediately re-fetching closes that gap down to ~5s, and crucially also
-                    // covers refreshes triggered externally by cron-job.org's warm_tick (not
-                    // just ones this tab's own runWarmWorker happened to drive).
+                    // This is the only recurring re-fetch of the visible barcode image left
+                    // (refreshVisibleCaches itself only runs once, at page load, plus on
+                    // tab-refocus) - detecting last_success_at moving forward here (every 5s)
+                    // and immediately re-fetching covers every real refresh, whether driven by
+                    // this tab's own runWarmWorker or triggered externally by cron-job.org.
                     (status.targets || []).forEach(target => {
                         const key = `${target.id}:${target.type}`;
                         const previousSuccessAt = lastKnownSuccessAt[key];
@@ -357,54 +372,40 @@
             }
 
             async function runWarmWorker() {
+                // Single call to /api/warm_tick - it acquires the lock, picks the target,
+                // performs the scrape, and records the result/releases the lock all in one
+                // server-side request (the exact same path cron-job.org uses every minute).
+                // Previously this was a 3-step client dance (warm_next -> get_barcode?warm=1
+                // -> warm_done); the middle step's returned barcode image was never even used
+                // (immediately discarded, then re-fetched via cache_only below anyway), so
+                // collapsing to one round trip changes nothing observable.
                 if (warmWorkerRunning) return;
                 warmWorkerRunning = true;
-                let next = null;
-                let success = false;
-                let httpCode = '';
                 try {
-                    const nextResponse = await fetch(`/api/warm_next?t=${Date.now()}`, { cache: 'no-store' });
-                    if (!nextResponse.ok) return;
-                    next = await nextResponse.json();
-                    if (next.status !== 'ok') {
-                        if (next.status === 'locked') {
-                            setTimeout(refreshWarmStatus, 1000);
-                        }
+                    const controller = new AbortController();
+                    const timeoutId = setTimeout(() => controller.abort(), 65000);
+                    const response = await fetch(`/api/warm_tick?t=${Date.now()}`, {
+                        cache: 'no-store',
+                        signal: controller.signal
+                    });
+                    clearTimeout(timeoutId);
+                    if (!response.ok) return;
+                    const result = await response.json();
+                    if (result.status === 'locked') {
+                        setTimeout(refreshWarmStatus, 1000);
                         return;
                     }
+                    if (result.status !== 'done') return;
                     refreshWarmStatus();
-
-                    const forceScrapeParam = next.force_scrape ? '&force_scrape=1' : '';
-                    const response = await fetch(`/api/get_barcode?id=${next.id}&type=${next.type}&warm=1${forceScrapeParam}&t=${Date.now()}`, {
-                        cache: 'no-store'
-                    });
-                    httpCode = String(response.status);
-                    success = response.ok && (response.headers.get('Content-Type') || '').startsWith('image/');
-                    if (success) {
-                        await response.blob();
-                        const card = document.getElementById(`card-${next.id}`);
-                        if (card && card.dataset.currentType === next.type) {
-                            fetchBarcode(next.id, next.type, { cacheOnly: true, preserveDisplay: false });
+                    if (result.success) {
+                        const card = document.getElementById(`card-${result.id}`);
+                        if (card && card.dataset.currentType === result.type) {
+                            fetchBarcode(result.id, result.type, { cacheOnly: true, preserveDisplay: false });
                         }
                     }
                 } catch (error) {
-                    httpCode = error.name || 'client_error';
+                    // Best effort - the next interval tick (or cron-job.org) will retry.
                 } finally {
-                    if (next && next.status === 'ok' && next.token) {
-                        const params = new URLSearchParams({
-                            id: next.id,
-                            type: next.type,
-                            token: next.token,
-                            success: success ? '1' : '0',
-                            http_code: httpCode,
-                            t: String(Date.now())
-                        });
-                        try {
-                            await fetch(`/api/warm_done?${params.toString()}`, { cache: 'no-store' });
-                        } catch (error) {
-                            // The lock expires on the server if this best-effort release fails.
-                        }
-                    }
                     warmWorkerRunning = false;
                 }
             }
@@ -422,6 +423,10 @@
                 if (card.dataset.currentType !== barcodeType && !options.cacheOnly) {
                     return;
                 }
+
+                const inFlightKey = queueKey(accountId, barcodeType);
+                if (inFlightFetches.has(inFlightKey)) return;
+                inFlightFetches.add(inFlightKey);
 
                 fetchingCards.add(accountId);
                 delete img.dataset.retryUntil;
@@ -441,9 +446,9 @@
                     timerEl.textContent = '';
                 }
                 // preserveDisplay means "there's already a valid image showing - this is just a
-                // quiet cache poll (every 30s from refreshVisibleCaches, or on a last_success_at
-                // change), not an actual live scrape". Flashing the loader/"생성 중" message here
-                // made it look like the barcode was being re-scraped every 30s when it never was.
+                // quiet cache poll (page load, tab-refocus, or a last_success_at change), not an
+                // actual live scrape". Flashing the loader/"생성 중" message here made it look
+                // like the barcode was being re-scraped constantly when it never was.
                 if (!preserveDisplay) {
                     loader.classList.remove('hidden');
                     buttons.forEach(button => button.disabled = true);
@@ -544,6 +549,7 @@
                 } finally {
                     buttons.forEach(button => button.disabled = false);
                     fetchingCards.delete(accountId);
+                    inFlightFetches.delete(inFlightKey);
                 }
             }
 

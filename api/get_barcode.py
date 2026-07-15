@@ -51,7 +51,7 @@ WARM_CURRENT_TTL = 90
 # on the account's current cycle, not "20 fresh minutes from whenever we happened to ask".
 # So a plain on-time scrape always spends its ~20-35s login/navigation AFTER the real expiry
 # has already passed, meaning the barcode is genuinely stale for that whole login duration.
-# To shrink that window, warm_next/warm_tick may pick a target up to this many seconds BEFORE
+# To shrink that window, warm_tick may pick a target up to this many seconds BEFORE
 # its real next_refresh_at (see select_warm_target) - the login/navigation happens early while
 # the old barcode is still technically valid, and once on the my-page, if the value read back
 # still looks like the tail end of the old cycle, poll_for_fresh_barcode() waits it out in
@@ -282,11 +282,20 @@ def select_warm_target(now=None, lead_seconds=WARM_EARLY_LOGIN_LEAD_SECONDS):
     # WARM_EARLY_LOGIN_LEAD_SECONDS above). Actually-overdue targets (due_at <= now) always
     # win over early-lead ones (due_at in (now, now+lead_seconds]) since they compare smaller.
     now = int(now or time.time())
+    # One MGET for all 6 targets' warm state instead of 6 separate round trips - this runs
+    # at the start of every warm_tick call, so it directly adds to how long a due
+    # target waits before its scrape even begins.
+    raw_states = redis_command(["MGET", *(warm_state_key(t["id"], t["type"]) for t in WARM_TARGETS)]) or [None] * len(WARM_TARGETS)
     selected = None
     selected_state = None
     selected_due = None
     for index, target in enumerate(WARM_TARGETS):
-        state = get_warm_state(target)
+        state = {}
+        if raw_states[index]:
+            try:
+                state = json.loads(raw_states[index])
+            except Exception as exc:
+                print(f"warm state parse failed: {exc}", flush=True)
         due_at = int(state.get("next_refresh_at") or 0)
         if due_at > now + lead_seconds:
             continue
@@ -730,44 +739,6 @@ def open_barcode_view(page, deadline=None):
     return "not-opened"
 
 
-@app.route("/api/warm_next", methods=["GET"])
-def warm_next():
-    now = int(time.time())
-    lock_token = acquire_warm_lock()
-    if not lock_token:
-        return json_response({"status": "locked", "retry_after": 60})
-    target, state = select_warm_target(now)
-    if not target:
-        release_warm_lock(lock_token)
-        next_due = None
-        states = []
-        for item in WARM_TARGETS:
-            item_state = get_warm_state(item)
-            due_at = int(item_state.get("next_refresh_at") or 0)
-            if due_at:
-                states.append(due_at)
-        if states:
-            next_due = min(states)
-        return json_response({"status": "no_due", "now": now, "next_due_at": next_due})
-    redis_command(["SET", warm_current_key(), json.dumps({
-        "token": lock_token,
-        "started_at": now,
-        "id": target["id"],
-        "type": target["type"],
-        "name": target["name"],
-    }), "EX", WARM_CURRENT_TTL])
-    return json_response({
-        "status": "ok",
-        "now": now,
-        "token": lock_token,
-        "id": target["id"],
-        "type": target["type"],
-        "name": target["name"],
-        "next_refresh_at": int(state.get("next_refresh_at") or 0),
-        "force_scrape": int(state.get("next_refresh_at") or 0) > now,
-    })
-
-
 def record_warm_result(target, token, success, http_code=""):
     now = int(time.time())
     existing = get_warm_state(target)
@@ -793,21 +764,6 @@ def record_warm_result(target, token, success, http_code=""):
     set_warm_state(target, state)
     release_warm_lock(token)
     return state
-
-
-@app.route("/api/warm_done", methods=["GET", "POST"])
-def warm_done():
-    account_id = request.values.get("id")
-    barcode_type = normalize_barcode_type(request.values.get("type"))
-    token = request.values.get("token")
-    success = request.values.get("success") == "1"
-    http_code = request.values.get("http_code", "")
-    target = next((item for item in WARM_TARGETS if item["id"] == account_id and item["type"] == barcode_type), None)
-    if not target:
-        release_warm_lock(token)
-        return json_response({"status": "unknown_target"}, 404)
-    state = record_warm_result(target, token, success, http_code)
-    return json_response({"status": "recorded", "success": success, "next_refresh_at": state["next_refresh_at"]})
 
 
 @app.route("/api/warm_tick", methods=["GET", "POST"])
@@ -854,18 +810,50 @@ def warm_tick():
 
 @app.route("/api/warm_status", methods=["GET"])
 def warm_status():
+    # Was up to 13 sequential Redis round trips (1 warm-current + 6 warm-state + up to
+    # 12 barcode-cache incl. the legacy-key fallback) - the frontend polls this every 5s
+    # per open tab, so that added up fast. One MGET covers all of it in a single round trip.
     now = int(time.time())
-    current_raw = redis_command(["GET", warm_current_key()])
+    state_keys = [warm_state_key(t["id"], t["type"]) for t in WARM_TARGETS]
+    cache_keys = [cache_key(t["id"], t["type"]) for t in WARM_TARGETS]
+    legacy_universe_keys = [f"barcode:{t['id']}" for t in WARM_TARGETS]
+    all_keys = [warm_current_key(), *state_keys, *cache_keys, *legacy_universe_keys]
+    raw_values = redis_command(["MGET", *all_keys]) or [None] * len(all_keys)
+    n = len(WARM_TARGETS)
+    current_raw = raw_values[0]
+    state_raws = raw_values[1:1 + n]
+    cache_raws = raw_values[1 + n:1 + 2 * n]
+    legacy_raws = raw_values[1 + 2 * n:1 + 3 * n]
+
     current = None
     if current_raw:
         try:
             current = json.loads(current_raw)
         except Exception:
             current = None
+
     targets = []
-    for item in WARM_TARGETS:
-        state = get_warm_state(item)
-        cached = get_cached_barcode(item["id"], item["type"], allow_stale=True)
+    for index, item in enumerate(WARM_TARGETS):
+        state = {}
+        if state_raws[index]:
+            try:
+                state = json.loads(state_raws[index])
+            except Exception as exc:
+                print(f"warm state parse failed: {exc}", flush=True)
+
+        raw_cache = cache_raws[index]
+        if not raw_cache and item["type"] == "universe":
+            raw_cache = legacy_raws[index]
+        cached = None
+        if raw_cache:
+            try:
+                cached = json.loads(raw_cache)
+                cached["seconds_left"] = max(0, int(cached.get("expires_at", 0) - now))
+                cached["stale"] = cached.get("expires_at", 0) <= now + 5
+            except Exception as exc:
+                print(f"redis cache parse failed: {exc}", flush=True)
+                cached = None
+
         targets.append({
             "id": item["id"],
             "type": item["type"],

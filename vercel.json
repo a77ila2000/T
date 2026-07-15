@@ -5,14 +5,6 @@
       "destination": "/api/get_barcode.py"
     },
     {
-      "source": "/api/warm_next",
-      "destination": "/api/warm_next.py"
-    },
-    {
-      "source": "/api/warm_done",
-      "destination": "/api/warm_done.py"
-    },
-    {
       "source": "/api/warm_status",
       "destination": "/api/warm_status.py"
     },
@@ -35,12 +27,6 @@
   "functions": {
     "api/get_barcode.py": {
       "maxDuration": 60
-    },
-    "api/warm_next.py": {
-      "maxDuration": 30
-    },
-    "api/warm_done.py": {
-      "maxDuration": 30
     },
     "api/warm_status.py": {
       "maxDuration": 30
