@@ -254,14 +254,23 @@
                         if (!card) return;
                         const barcodeType = card.dataset.currentType || 'universe';
                         const img = card.querySelector(`img[data-id="${account.id}"]`);
-                        if (img.dataset.objectUrl && img.dataset.stale !== '1') return;
+                        const isActive = Boolean(current && current.id === account.id && current.type === barcodeType);
+                        const queuePosition = dueTargets.findIndex(target => target.id === account.id && target.type === barcodeType);
+                        // Whether this target is due comes straight from this warm_status poll
+                        // (isActive/dueTargets), not from img.dataset.stale - that DOM flag is
+                        // only set once an actual fetchBarcode response comes back, which (with
+                        // no tab-refocus event to force one) doesn't happen until the refresh
+                        // itself finishes. Gating on it left this per-card status frozen at
+                        // whatever text was showing at the moment of local expiry for the
+                        // entire refresh duration, while the status panel above (driven by the
+                        // same poll) correctly ticked through "갱신 중 (M:SS 경과)" the whole time.
+                        const isDue = isActive || queuePosition !== -1;
+                        if (img.dataset.objectUrl && !isDue) return;
 
                         const placeholder = card.querySelector('.barcode-placeholder');
                         const statusEl = card.querySelector('.status');
                         const loader = card.querySelector('.loader');
-                        const isActive = Boolean(current && current.id === account.id && current.type === barcodeType);
-                        const queuePosition = dueTargets.findIndex(target => target.id === account.id && target.type === barcodeType);
-                        const showingStaleImage = Boolean(img.dataset.objectUrl && img.dataset.stale === '1');
+                        const showingStaleImage = Boolean(img.dataset.objectUrl && isDue);
 
                         statusEl.classList.toggle('active-refresh', isActive);
 
@@ -367,7 +376,10 @@
                     const card = document.getElementById(`card-${account.id}`);
                     if (!card) return;
                     const img = card.querySelector(`img[data-id="${account.id}"]`);
-                    if (!img || img.dataset.stale !== '1') return;
+                    // Same fix as refreshWarmStatus's per-card block above: determine "is this
+                    // due" from the live warm_status target data (remaining <= 0 below), not
+                    // from img.dataset.stale, which lags behind by up to a full refresh cycle.
+                    if (!img || !img.dataset.objectUrl) return;
                     const barcodeType = card.dataset.currentType || 'universe';
                     const target = (status.targets || []).find(t => t.id === account.id && t.type === barcodeType);
                     if (!target) return;
@@ -514,7 +526,6 @@
                         URL.revokeObjectURL(img.dataset.objectUrl);
                     }
                     delete img.dataset.refreshQueued;
-                    img.dataset.stale = isStale ? '1' : '0';
                     img.dataset.objectUrl = objectUrl;
                     img.src = objectUrl;
                     img.classList.remove('hidden');
