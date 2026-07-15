@@ -71,27 +71,6 @@ LAST_BARCODE_RETENTION = 7 * 24 * 60 * 60
 # TTL (acquire_browser_lock) is the backstop if a rare slow step still gets hard-killed
 # past 60s instead of hitting this check cleanly.
 SCRAPE_BUDGET_SECONDS = 50
-# Same-account sibling chaining (universe<->general): they share one real expiry moment
-# (see the WARM_EARLY_LOGIN_LEAD_SECONDS comment below), so whichever goes second was
-# previously left waiting for the NEXT external trigger (cron-job.org, up to 1 minute)
-# after the first one's login finished - that wait, not the second login itself, was the
-# dominant source of delay. warm_tick() now attempts the sibling immediately, in the same
-# request, if there's enough of the overall deadline left - see warm_tick() for the chain
-# loop. WARM_TICK_OVERALL_DEADLINE_SECONDS leaves a 5s margin under Vercel's 60s maxDuration
-# for warm_tick.py; WARM_CHAIN_MIN_BUDGET_SECONDS is the minimum remaining time worth
-# attempting a second login for (general's own login is ~15-25s) - below that, chaining
-# would likely just time out mid-flight and waste the browser lock, so it's skipped and the
-# sibling falls back to the next external trigger, same as before this change.
-WARM_TICK_OVERALL_DEADLINE_SECONDS = 56
-# 25s was too conservative in practice - a real universe early-lead attempt (with polling)
-# observed taking ~31s left only ~24s of the 55s deadline, missing the old 25s bar by 1s and
-# skipping the chain entirely. 18s (tried next) was too loose the other way - a chained
-# general attempt with that little budget likely hit its own ScrapeTimeout, which (combined
-# with a separate bug in the browser-lock-busy fallback, since fixed - see
-# "X-Barcode-Fallback" below) produced a retry storm. 22s is the middle ground: enough for
-# general's typical ~15-25s login most of the time, without inviting a timeout on the
-# common case.
-WARM_CHAIN_MIN_BUDGET_SECONDS = 22
 
 
 class ScrapeTimeout(Exception):
@@ -800,7 +779,7 @@ def open_barcode_view(page, deadline=None):
     return "not-opened"
 
 
-def record_warm_result(target, token, success, http_code="", release_lock=True):
+def record_warm_result(target, token, success, http_code=""):
     now = int(time.time())
     existing = get_warm_state(target)
     if success:
@@ -823,139 +802,62 @@ def record_warm_result(target, token, success, http_code="", release_lock=True):
             "last_http_code": http_code,
         }
     set_warm_state(target, state)
-    # release_lock=False when warm_tick is about to chain straight into the same account's
-    # sibling type in this same request - releasing here would let a different concurrent
-    # request grab the browser lock in the gap between the two chained scrapes.
-    if release_lock:
-        release_warm_lock(token)
+    release_warm_lock(token)
     return state
-
-
-def sibling_target(target):
-    sibling_type = "general" if target["type"] == "universe" else "universe"
-    return next((t for t in WARM_TARGETS if t["id"] == target["id"] and t["type"] == sibling_type), None)
 
 
 @app.route("/api/warm_tick", methods=["GET", "POST"])
 def warm_tick():
+    # Same-account sibling chaining (attempting universe then immediately general, or vice
+    # versa, in one request) was tried and reverted here: live observation showed it rarely
+    # actually engaged (universe and general's real due times aren't as tightly synced as
+    # assumed - either can become due first) and its tighter per-call time budget contributed
+    # to exposing a separate false-success bug (see the X-Barcode-Fallback check below) as a
+    # retry storm. That bug fix alone brought the same-person pair gap down to a consistent
+    # ~40-60s with no failures - back to the simple single-target-per-request version.
     now = int(time.time())
     lock_token = acquire_warm_lock()
     if not lock_token:
         return json_response({"status": "locked", "retry_after": 60})
-    # Short per-request tag for correlating log lines - Vercel's log stream interleaves
-    # concurrent requests and has occasionally dropped/reordered lines under load (observed
-    # while debugging the chaining feature below), so every line in this request includes
-    # [tag] to let `grep tag=XXXXXX` reconstruct one request's full trace unambiguously.
-    tag = lock_token.split(":")[-1][-6:]
     target, state = select_warm_target(now)
     if not target:
         release_warm_lock(lock_token)
-        print(f"debug warm_tick[{tag}] no_due now={now}", flush=True)
         return json_response({"status": "no_due", "now": now})
-
-    print(
-        f"debug warm_tick[{tag}] START now={now} selected={target['id']}/{target['type']} "
-        f"selected_due_at={int(state.get('next_refresh_at') or 0)} "
-        f"selected_due_in={int(state.get('next_refresh_at') or 0) - now}s",
-        flush=True,
-    )
-
-    # Same-account sibling chaining (universe<->general) - see the comment near
-    # WARM_TICK_OVERALL_DEADLINE_SECONDS. Capped at 2 iterations: this loop only ever
-    # widens to "this target, then maybe its one sibling," never further - if a chained
-    # attempt happened to fail with an immediate-retry delay (0s), its own sibling check
-    # would otherwise see the original target as "due again" and could loop indefinitely.
-    started_overall = time.monotonic()
-    results = []
-    current_target, current_state = target, state
-    while current_target and len(results) < 2:
-        tick_now = int(time.time())
-        is_early = int(current_state.get("next_refresh_at") or 0) > tick_now
-        redis_command(["SET", warm_current_key(), json.dumps({
-            "token": lock_token,
-            "started_at": tick_now,
-            "id": current_target["id"],
-            "type": current_target["type"],
-            "name": current_target["name"],
-        }), "EX", WARM_CURRENT_TTL])
-
-        remaining_before = WARM_TICK_OVERALL_DEADLINE_SECONDS - (time.monotonic() - started_overall)
-        call_budget = min(SCRAPE_BUDGET_SECONDS, max(10, remaining_before))
-        print(
-            f"debug warm_tick[{tag}] iter={len(results)} starting {current_target['id']}/{current_target['type']} "
-            f"is_early={is_early} budget={call_budget:.1f}s elapsed_so_far={time.monotonic() - started_overall:.1f}s",
-            flush=True,
-        )
-        call_started = time.monotonic()
-        try:
-            result = perform_barcode_request(
-                current_target["id"], current_target["type"], force_scrape=is_early, budget_seconds=call_budget
-            )
-            if isinstance(result, tuple):
-                body, http_code = result[0], result[1]
-            else:
-                body, http_code = result, getattr(result, "status_code", 200)
-            content_type = getattr(body, "mimetype", "") or ""
-            is_fallback = bool(getattr(body, "headers", None) and body.headers.get("X-Barcode-Fallback"))
-            # A lock-busy fallback re-served the old cache instead of actually scraping -
-            # count it as a failure so the normal backoff (compute_failure_retry_delay)
-            # kicks in on repeat contention, instead of retrying every few seconds forever.
-            success = http_code == 200 and content_type.startswith("image/") and not is_fallback
-        except Exception as exc:
-            print(f"warm_tick[{tag}] failed for {current_target['id']}/{current_target['type']}: {type(exc).__name__}: {exc}", flush=True)
-            http_code = 500
-            success = False
-            is_fallback = False
-        print(
-            f"debug warm_tick[{tag}] iter={len(results)} finished {current_target['id']}/{current_target['type']} "
-            f"http_code={http_code} success={success} fallback={is_fallback} took={time.monotonic() - call_started:.1f}s",
-            flush=True,
-        )
-
-        sibling = sibling_target(current_target)
-        sibling_state = get_warm_state(sibling) if sibling else {}
-        remaining_after = WARM_TICK_OVERALL_DEADLINE_SECONDS - (time.monotonic() - started_overall)
-        sibling_due_at = int(sibling_state.get("next_refresh_at") or 0)
-        will_chain = bool(
-            sibling
-            and len(results) == 0
-            and remaining_after >= WARM_CHAIN_MIN_BUDGET_SECONDS
-            and sibling_due_at <= int(time.time()) + WARM_EARLY_LOGIN_LEAD_SECONDS
-        )
-        print(
-            f"debug warm_tick[{tag}] chain check after {current_target['id']}/{current_target['type']}: "
-            f"sibling={sibling['type'] if sibling else None} sibling_due_at={sibling_due_at} "
-            f"sibling_due_in={sibling_due_at - int(time.time())}s "
-            f"remaining_after={remaining_after:.1f}s will_chain={will_chain}",
-            flush=True,
-        )
-
-        result_state = record_warm_result(current_target, lock_token, success, str(http_code), release_lock=not will_chain)
-        results.append({
-            "id": current_target["id"],
-            "type": current_target["type"],
-            "name": current_target["name"],
-            "success": success,
-            "http_code": http_code,
-            "next_refresh_at": result_state["next_refresh_at"],
-        })
-
-        if not will_chain:
-            break
-        current_target, current_state = sibling, sibling_state
-
-    print(f"debug warm_tick[{tag}] DONE results={results}", flush=True)
-
-    last = results[-1]
+    is_early = int(state.get("next_refresh_at") or 0) > now
+    redis_command(["SET", warm_current_key(), json.dumps({
+        "token": lock_token,
+        "started_at": now,
+        "id": target["id"],
+        "type": target["type"],
+        "name": target["name"],
+    }), "EX", WARM_CURRENT_TTL])
+    try:
+        result = perform_barcode_request(target["id"], target["type"], force_scrape=is_early)
+        if isinstance(result, tuple):
+            body, http_code = result[0], result[1]
+        else:
+            body, http_code = result, getattr(result, "status_code", 200)
+        content_type = getattr(body, "mimetype", "") or ""
+        is_fallback = bool(getattr(body, "headers", None) and body.headers.get("X-Barcode-Fallback"))
+        # A lock-busy fallback (browser lock held by another request) re-serves the last
+        # cached barcode instead of actually scraping - without this check it looked
+        # identical to a genuine fresh success to the naive "200 + image" test below, which
+        # never touched last_failure_at/consecutive_failures, so repeat contention could
+        # retry every few seconds forever instead of backing off normally.
+        success = http_code == 200 and content_type.startswith("image/") and not is_fallback
+    except Exception as exc:
+        print(f"warm_tick failed for {target['id']}/{target['type']}: {type(exc).__name__}: {exc}", flush=True)
+        http_code = 500
+        success = False
+    state = record_warm_result(target, lock_token, success, str(http_code))
     return json_response({
         "status": "done",
-        "id": last["id"],
-        "type": last["type"],
-        "name": last["name"],
-        "success": last["success"],
-        "http_code": last["http_code"],
-        "next_refresh_at": last["next_refresh_at"],
-        "results": results,
+        "id": target["id"],
+        "type": target["type"],
+        "name": target["name"],
+        "success": success,
+        "http_code": http_code,
+        "next_refresh_at": state["next_refresh_at"],
     })
 
 
@@ -1033,7 +935,7 @@ def handler():
     return perform_barcode_request(account_id, barcode_type, debug_mode=debug_mode, cache_only=cache_only, force_scrape=force_scrape)
 
 
-def poll_for_fresh_barcode(fetch_fn, page, mark, started, initial, budget_seconds=SCRAPE_BUDGET_SECONDS, min_fresh_seconds=300, poll_interval_ms=2000):
+def poll_for_fresh_barcode(fetch_fn, page, mark, started, initial, min_fresh_seconds=300, poll_interval_ms=2000):
     # Only called for a deliberately early warm attempt (force_scrape=True, see
     # WARM_EARLY_LOGIN_LEAD_SECONDS): the login/navigation already happened before the real
     # expiry, so `initial` may still be the tail end of the OLD cycle (small seconds_left).
@@ -1042,7 +944,7 @@ def poll_for_fresh_barcode(fetch_fn, page, mark, started, initial, budget_second
     # scrape budget runs out, whichever comes first. Falls back to whatever was last read if
     # the budget runs out, same as today's behavior - no correctness regression either way.
     result = initial
-    deadline = started + budget_seconds - 6
+    deadline = started + SCRAPE_BUDGET_SECONDS - 6
     while result.get("number") and int(result.get("seconds_left") or 0) < min_fresh_seconds and time.monotonic() < deadline:
         page.wait_for_timeout(poll_interval_ms)
         mark("poll_for_rotation")
@@ -1050,7 +952,7 @@ def poll_for_fresh_barcode(fetch_fn, page, mark, started, initial, budget_second
     return result
 
 
-def perform_barcode_request(account_id, barcode_type, debug_mode=False, cache_only=False, force_scrape=False, budget_seconds=SCRAPE_BUDGET_SECONDS):
+def perform_barcode_request(account_id, barcode_type, debug_mode=False, cache_only=False, force_scrape=False):
     browser = None
     lock_token = None
     stage = "start"
@@ -1064,13 +966,13 @@ def perform_barcode_request(account_id, barcode_type, debug_mode=False, cache_on
         # signal.alarm silently has no effect) - so every stage transition also checks
         # elapsed wall-clock time directly and bails out via normal Python control flow,
         # which works regardless of threading/signal semantics.
-        if elapsed > budget_seconds:
-            raise ScrapeTimeout(f"scrape exceeded {budget_seconds}s internal budget at stage={label}")
+        if elapsed > SCRAPE_BUDGET_SECONDS:
+            raise ScrapeTimeout(f"scrape exceeded {SCRAPE_BUDGET_SECONDS}s internal budget at stage={label}")
     has_alarm = False
     if hasattr(signal, "alarm"):
         try:
             signal.signal(signal.SIGALRM, _scrape_alarm_handler)
-            signal.alarm(int(budget_seconds))
+            signal.alarm(SCRAPE_BUDGET_SECONDS)
             has_alarm = True
         except Exception as exc:
             print(f"debug scrape alarm unavailable: {type(exc).__name__}: {exc}", flush=True)
@@ -1095,15 +997,13 @@ def perform_barcode_request(account_id, barcode_type, debug_mode=False, cache_on
             if not debug_mode and cached:
                 resync_warm_schedule_from_cache(account_id, barcode_type, cached)
                 # X-Barcode-Fallback tells warm_tick this wasn't a real scrape attempt (the
-                # browser lock was busy - probably another target's chained scrape still
-                # running) - just re-serving whatever was cached. Without this marker,
-                # warm_tick's naive "200 + image content-type = success" check treated this
-                # the same as a genuine fresh refresh, which (a) never actually renewed a
-                # stale barcode and (b) crucially never touched last_failure_at/
+                # browser lock was busy) - just re-serving whatever was cached. Without this
+                # marker, warm_tick's naive "200 + image content-type = success" check
+                # treated this the same as a genuine fresh refresh, which (a) never actually
+                # renewed a stale barcode and (b) crucially never touched last_failure_at/
                 # consecutive_failures, so nothing throttled the retry - observed causing a
-                # sub-second-interval retry storm once the early-login-lead chaining
-                # (WARM_TICK_OVERALL_DEADLINE_SECONDS) started landing two scrapes close
-                # enough together to make lock contention here common instead of rare.
+                # sub-second-interval retry storm during a since-reverted experiment that
+                # briefly made lock contention here common instead of rare.
                 resp = barcode_response(cached["number"], cached.get("seconds_left", 0), cached.get("grade", ""), cached.get("stale", False), cached.get("stale_seconds", 0))
                 resp.headers["X-Barcode-Fallback"] = "lock-busy"
                 return resp
@@ -1141,7 +1041,7 @@ def perform_barcode_request(account_id, barcode_type, debug_mode=False, cache_on
                     # inside it), so skip it once there isn't enough budget headroom left to
                     # absorb that on top of the current elapsed time - better a clean early
                     # failure than running past Vercel's own 60s hard kill.
-                    if result == "timeout" and "auth.skt-id.co.kr" in safe_url(page) and (time.monotonic() - started) < (budget_seconds - 15):
+                    if result == "timeout" and "auth.skt-id.co.kr" in safe_url(page) and (time.monotonic() - started) < (SCRAPE_BUDGET_SECONDS - 15):
                         stage = "retry_tworld_idpw_login"; mark(stage)
                         ensure_idpw_login_mode(page)
                         submit_tid_credentials(page, target, "tworld-retry")
@@ -1188,7 +1088,7 @@ def perform_barcode_request(account_id, barcode_type, debug_mode=False, cache_on
                 submit_tid_credentials(page, target)
                 mark("after_submit_tid_credentials")
                 result = wait_for_tid_result(page, 10000)
-                if result == "timeout" and "auth.skt-id.co.kr" in safe_url(page) and (time.monotonic() - started) < (budget_seconds - 15):
+                if result == "timeout" and "auth.skt-id.co.kr" in safe_url(page) and (time.monotonic() - started) < (SCRAPE_BUDGET_SECONDS - 15):
                     stage = "retry_tid_idpw_login"; mark(stage)
                     ensure_idpw_login_mode(page)
                     submit_tid_credentials(page, target, "retry")
@@ -1218,9 +1118,9 @@ def perform_barcode_request(account_id, barcode_type, debug_mode=False, cache_on
                         f"T membership card cancellation is in progress\nID: {account_id}\ncode={barcode_api.get('code')}\nmessage={barcode_api.get('message') or barcode_api.get('raw')}"
                     ), 409
             stage = "open_barcode_view"; mark(stage)
-            if time.monotonic() - started > budget_seconds + 2:
+            if time.monotonic() - started > 52:
                 return image_response(f"Barcode timed out before opening view\nID: {account_id}\nelapsed={time.monotonic() - started:.1f}s"), 504
-            barcode_result = open_barcode_view(page, started + budget_seconds + 2)
+            barcode_result = open_barcode_view(page, started + 52)
             barcode_number = ""
             for _ in range(10):
                 barcode_number = extract_barcode_number(page)
@@ -1236,7 +1136,7 @@ def perform_barcode_request(account_id, barcode_type, debug_mode=False, cache_on
             return image_response(f"Barcode number not found\nID: {account_id}\nbarcode_result={barcode_result}\nurl={safe_url(page)}\nbody={get_body_text(page, 260)}"), 502
     except ScrapeTimeout as exc:
         print(f"Scrape timed out for {account_id} at {stage}: elapsed={time.monotonic() - started:.1f}s", flush=True)
-        return image_response(f"Barcode scrape exceeded {budget_seconds}s budget\nID: {account_id}\nstage={stage}"), 504
+        return image_response(f"Barcode scrape exceeded {SCRAPE_BUDGET_SECONDS}s budget\nID: {account_id}\nstage={stage}"), 504
     except Exception as exc:
         print(f"Error processing {account_id} at {stage}: {type(exc).__name__}: {exc}", flush=True)
         return image_response(f"Barcode failed\nID: {account_id}\n{stage}: {type(exc).__name__}: {exc}"), 502
