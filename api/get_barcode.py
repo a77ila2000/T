@@ -786,8 +786,12 @@ def open_barcode_view(page, deadline=None):
         }
         """)
         page.wait_for_timeout(900)
-        print(f"debug barcode dom click={clicked} url={safe_url(page)} body={get_body_text(page, 180)}", flush=True)
-        if safe_url(page) != before_url or get_body_text(page, 220) != before_text:
+        # get_body_text() is a real page.locator().inner_text() CDP round-trip, not a local
+        # read - fetch the page state once and reuse it for both the debug print and the
+        # comparison below (same instant, same text) instead of asking the remote page twice.
+        current_text = get_body_text(page, 220)
+        print(f"debug barcode dom click={clicked} url={safe_url(page)} body={current_text[:180]}", flush=True)
+        if safe_url(page) != before_url or current_text != before_text:
             return f"dom:{clicked}"
     except Exception as exc:
         print(f"debug barcode dom click failed: {exc}", flush=True)
@@ -796,8 +800,11 @@ def open_barcode_view(page, deadline=None):
             return "deadline-before-barcode-tap"
         physical_tap_at(page, x, y)
         page.wait_for_timeout(1300)
-        print(f"debug barcode coordinate tapped {x},{y} url={safe_url(page)} body={get_body_text(page, 180)}", flush=True)
-        if extract_barcode_number(page) or safe_url(page) != before_url or get_body_text(page, 220) != before_text:
+        # Same dedup as the dom-click branch above - one CDP round-trip reused for both the
+        # print and the comparison instead of two, across up to 7 loop iterations.
+        current_text = get_body_text(page, 220)
+        print(f"debug barcode coordinate tapped {x},{y} url={safe_url(page)} body={current_text[:180]}", flush=True)
+        if extract_barcode_number(page) or safe_url(page) != before_url or current_text != before_text:
             return f"tap({x},{y})"
     return "not-opened"
 
@@ -892,14 +899,18 @@ def warm_status():
     now = int(time.time())
     state_keys = [warm_state_key(t["id"], t["type"]) for t in WARM_TARGETS]
     cache_keys = [cache_key(t["id"], t["type"]) for t in WARM_TARGETS]
-    legacy_universe_keys = [f"barcode:{t['id']}" for t in WARM_TARGETS]
-    all_keys = [warm_current_key(), *state_keys, *cache_keys, *legacy_universe_keys]
+    # WARM_TARGETS has 2 entries per account (universe + general), but the legacy fallback
+    # key only depends on account id, not type - fetching it once per WARM_TARGETS entry
+    # asked Redis for the same 3 keys twice on every single call to this 5s-polled endpoint.
+    account_ids = list(dict.fromkeys(t["id"] for t in WARM_TARGETS))
+    legacy_keys = [f"barcode:{aid}" for aid in account_ids]
+    all_keys = [warm_current_key(), *state_keys, *cache_keys, *legacy_keys]
     raw_values = mget_padded(all_keys)
     n = len(WARM_TARGETS)
     current_raw = raw_values[0]
     state_raws = raw_values[1:1 + n]
     cache_raws = raw_values[1 + n:1 + 2 * n]
-    legacy_raws = raw_values[1 + 2 * n:1 + 3 * n]
+    legacy_by_id = dict(zip(account_ids, raw_values[1 + 2 * n:1 + 2 * n + len(account_ids)]))
 
     current = None
     if current_raw:
@@ -919,7 +930,7 @@ def warm_status():
 
         raw_cache = cache_raws[index]
         if not raw_cache and item["type"] == "universe":
-            raw_cache = legacy_raws[index]
+            raw_cache = legacy_by_id.get(item["id"])
         cached = None
         if raw_cache:
             try:
