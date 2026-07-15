@@ -62,8 +62,6 @@
             const cardContainer = document.getElementById('card-container');
             const BARCODE_VALID_TIME = 20 * 60;
             const CLIENT_WARM_INTERVAL_MS = 3 * 60 * 1000;
-            const refreshQueue = [];
-            const queuedKeys = new Set();
             const fetchingCards = new Set();
             // Separate from fetchingCards above (which is keyed by accountId alone, and only
             // used to skip clobbering status text during a poll) - this one is keyed by
@@ -71,7 +69,6 @@
             // simultaneous triggers for the same account+type (e.g. a tab regaining focus
             // right as the 5s status poll also fires) would both fire actual HTTP requests.
             const inFlightFetches = new Set();
-            let queueRunning = false;
             let warmWorkerRunning = false;
             let lastWarmStatusFetch = null;
             const lastKnownSuccessAt = {};
@@ -199,32 +196,6 @@
                 list.innerHTML = benefits.map(benefit => `<li>${benefit}</li>`).join('');
             }
 
-            function enqueueBarcode(accountId, barcodeType, options = {}) {
-                const key = queueKey(accountId, barcodeType);
-                if (queuedKeys.has(key)) {
-                    return;
-                }
-                queuedKeys.add(key);
-                refreshQueue.push({ accountId, barcodeType, options });
-                processQueue();
-            }
-
-            async function processQueue() {
-                if (queueRunning) return;
-                queueRunning = true;
-                while (refreshQueue.length) {
-                    const job = refreshQueue.shift();
-                    queuedKeys.delete(queueKey(job.accountId, job.barcodeType));
-                    await fetchBarcode(job.accountId, job.barcodeType, job.options);
-                    await delay(1500);
-                }
-                queueRunning = false;
-            }
-
-            function delay(ms) {
-                return new Promise(resolve => setTimeout(resolve, ms));
-            }
-
             function refreshVisibleCaches() {
                 accounts.forEach(account => {
                     const card = document.getElementById(`card-${account.id}`);
@@ -280,7 +251,6 @@
                         const barcodeType = card.dataset.currentType || 'universe';
                         const img = card.querySelector(`img[data-id="${account.id}"]`);
                         if (img.dataset.objectUrl && img.dataset.stale !== '1') return;
-                        if (Number(img.dataset.retryUntil || 0) > Date.now()) return;
 
                         const placeholder = card.querySelector('.barcode-placeholder');
                         const statusEl = card.querySelector('.status');
@@ -429,7 +399,6 @@
                 inFlightFetches.add(inFlightKey);
 
                 fetchingCards.add(accountId);
-                delete img.dataset.retryUntil;
 
                 if (!preserveDisplay && img.dataset.timerId) {
                     clearInterval(parseInt(img.dataset.timerId));
@@ -473,21 +442,6 @@
                         } else {
                             statusEl.textContent = '순차 갱신 대기 중입니다.';
                         }
-                        return;
-                    }
-                    if (response.status === 423) {
-                        const retryAfter = Math.max(60, parseInt(response.headers.get('Retry-After') || '75', 10));
-                        loader.classList.add('hidden');
-                        if (!preserveDisplay) {
-                            img.classList.add('hidden');
-                            placeholder.classList.remove('hidden');
-                            placeholder.textContent = '다른 바코드가 갱신 중입니다. 잠시 후 자동 재시도합니다.';
-                        }
-                        statusEl.textContent = `${retryAfter}초 후 다시 시도합니다.`;
-                        img.dataset.retryUntil = String(Date.now() + retryAfter * 1000);
-                        setTimeout(() => enqueueBarcode(accountId, barcodeType, {
-                            preserveDisplay: true
-                        }), retryAfter * 1000);
                         return;
                     }
                     if (!response.ok) {

@@ -125,6 +125,19 @@ def redis_command(command, timeout=4):
         return None
 
 
+def mget_padded(keys):
+    # Guarantees a list of exactly len(keys) elements. redis_command already returns None
+    # on any error, which the `or` below turns into an all-None list - but a *successful*
+    # MGET response, in the extremely unlikely event Upstash ever returned fewer entries
+    # than requested, would leave every call site here indexing off the end of the list
+    # (IndexError, 500) instead of just treating the missing ones as absent keys.
+    keys = list(keys)
+    values = redis_command(["MGET", *keys]) or []
+    if len(values) != len(keys):
+        values = (list(values) + [None] * len(keys))[:len(keys)]
+    return values
+
+
 def normalize_barcode_type(value):
     return "general" if value in ("general", "normal", "tworld") else "universe"
 
@@ -285,7 +298,7 @@ def select_warm_target(now=None, lead_seconds=WARM_EARLY_LOGIN_LEAD_SECONDS):
     # One MGET for all 6 targets' warm state instead of 6 separate round trips - this runs
     # at the start of every warm_tick call, so it directly adds to how long a due
     # target waits before its scrape even begins.
-    raw_states = redis_command(["MGET", *(warm_state_key(t["id"], t["type"]) for t in WARM_TARGETS)]) or [None] * len(WARM_TARGETS)
+    raw_states = mget_padded(warm_state_key(t["id"], t["type"]) for t in WARM_TARGETS)
     selected = None
     selected_state = None
     selected_due = None
@@ -818,7 +831,7 @@ def warm_status():
     cache_keys = [cache_key(t["id"], t["type"]) for t in WARM_TARGETS]
     legacy_universe_keys = [f"barcode:{t['id']}" for t in WARM_TARGETS]
     all_keys = [warm_current_key(), *state_keys, *cache_keys, *legacy_universe_keys]
-    raw_values = redis_command(["MGET", *all_keys]) or [None] * len(all_keys)
+    raw_values = mget_padded(all_keys)
     n = len(WARM_TARGETS)
     current_raw = raw_values[0]
     state_raws = raw_values[1:1 + n]
