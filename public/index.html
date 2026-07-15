@@ -296,6 +296,13 @@
                 return `${m}:${String(s).padStart(2, '0')} 남음`;
             }
 
+            function formatStaleFor(seconds) {
+                const total = Math.max(0, Math.floor(seconds));
+                const m = Math.floor(total / 60);
+                const s = total % 60;
+                return `만료됨 (${m}:${String(s).padStart(2, '0')} 경과)`;
+            }
+
             function targetStatusFor(target, current, dueTargets, elapsedSec) {
                 const isActive = Boolean(current && current.id === target.id && current.type === target.type);
                 const queuePosition = dueTargets.findIndex(t => t.id === target.id && t.type === target.type);
@@ -309,7 +316,13 @@
                 // second instead of only updating on the next ~5s warm_status refresh.
                 const remaining = Math.max(0, Number(target.seconds_left || 0) - elapsedSec);
                 if (remaining <= 0) {
-                    return { valueText: '만료됨', valueClass: 'stale' };
+                    // target.stale_seconds is how long it had already been expired as of the
+                    // last poll; elapsedSec is time since that poll, minus any of target's own
+                    // seconds_left that hadn't yet run out at poll time (covers the case where
+                    // this branch is reached by the client's own countdown predicting expiry
+                    // before the server has confirmed it).
+                    const staleFor = Number(target.stale_seconds || 0) + elapsedSec - Number(target.seconds_left || 0);
+                    return { valueText: formatStaleFor(staleFor), valueClass: 'stale' };
                 }
                 return { valueText: formatSecondsLeft(remaining), valueClass: 'fresh' };
             }
@@ -457,6 +470,8 @@
                     const barcodeNumber = response.headers.get('X-Barcode-Number') || '';
                     const membershipGrade = response.headers.get('X-Membership-Grade') || '';
                     const isStale = response.headers.get('X-Barcode-Stale') === '1';
+                    const parsedStaleSeconds = parseInt(response.headers.get('X-Barcode-Stale-Seconds') || '', 10);
+                    const staleSeconds = Number.isFinite(parsedStaleSeconds) ? parsedStaleSeconds : 0;
                     if (barcodeType === 'general' && membershipGrade) {
                         card.dataset.generalGrade = membershipGrade;
                         updateBenefits(accountId, barcodeType);
@@ -481,7 +496,7 @@
                     placeholder.classList.add('hidden');
                     loader.classList.add('hidden');
                     if (isStale) {
-                        timerEl.textContent = '만료됨';
+                        startStaleTimer(accountId, barcodeType, staleSeconds);
                         statusEl.textContent = barcodeNumber
                             ? `마지막 ${barcodeTypes[barcodeType]}를 표시 중입니다. 순차 갱신 대기 중입니다. (${barcodeNumber})`
                             : `마지막 ${barcodeTypes[barcodeType]}를 표시 중입니다. 순차 갱신 대기 중입니다.`;
@@ -533,6 +548,29 @@
                             runWarmWorker();
                         }
                     }
+                };
+
+                updateTimer();
+                const timerId = setInterval(updateTimer, 1000);
+                img.dataset.timerId = timerId.toString();
+            }
+
+            function startStaleTimer(accountId, barcodeType, initialStaleSeconds) {
+                const card = document.getElementById(`card-${accountId}`);
+                const img = card.querySelector(`img[data-id="${accountId}"]`);
+                const timerEl = card.querySelector('.timer');
+
+                let staleFor = Math.max(0, initialStaleSeconds);
+
+                const updateTimer = () => {
+                    if (card.dataset.currentType !== barcodeType) {
+                        clearInterval(timerId);
+                        return;
+                    }
+                    const minutes = Math.floor(staleFor / 60);
+                    const seconds = staleFor % 60;
+                    timerEl.textContent = `만료됨 (${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')} 경과)`;
+                    staleFor += 1;
                 };
 
                 updateTimer();

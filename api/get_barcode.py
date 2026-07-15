@@ -194,6 +194,7 @@ def get_cached_barcode(account_id, barcode_type="universe", allow_stale=False):
         value = json.loads(raw)
         value["seconds_left"] = max(0, int(value.get("expires_at", 0) - now))
         value["stale"] = value.get("expires_at", 0) <= now + 5
+        value["stale_seconds"] = max(0, int(now - value.get("expires_at", now)))
         if value["stale"] and not allow_stale:
             return None
         return value
@@ -378,7 +379,7 @@ def screenshot_bytes(page):
     return base64.b64decode(client.send("Page.captureScreenshot", {"format": "png", "fromSurface": True})["data"])
 
 
-def barcode_response(number, seconds_left=1200, grade="", stale=False):
+def barcode_response(number, seconds_left=1200, grade="", stale=False, stale_seconds=0):
     from PIL import Image, ImageDraw, ImageFont
     number = re.sub(r"\D", "", str(number))
     if not number:
@@ -408,6 +409,7 @@ def barcode_response(number, seconds_left=1200, grade="", stale=False):
     resp.headers["X-Barcode-Seconds-Left"] = str(max(0, int(seconds_left or 0)))
     resp.headers["X-Barcode-Stale"] = "1" if stale else "0"
     resp.headers["X-Barcode-Status"] = "stale" if stale else "valid"
+    resp.headers["X-Barcode-Stale-Seconds"] = str(max(0, int(stale_seconds or 0)))
     if grade:
         resp.headers["X-Membership-Grade"] = str(grade)
     return resp
@@ -863,6 +865,7 @@ def warm_status():
                 cached = json.loads(raw_cache)
                 cached["seconds_left"] = max(0, int(cached.get("expires_at", 0) - now))
                 cached["stale"] = cached.get("expires_at", 0) <= now + 5
+                cached["stale_seconds"] = max(0, int(now - cached.get("expires_at", now)))
             except Exception as exc:
                 print(f"redis cache parse failed: {exc}", flush=True)
                 cached = None
@@ -877,6 +880,7 @@ def warm_status():
             "has_cache": bool(cached),
             "stale": bool(cached and cached.get("stale")),
             "seconds_left": int(cached.get("seconds_left", 0)) if cached else 0,
+            "stale_seconds": int(cached.get("stale_seconds", 0)) if cached else 0,
         })
     return json_response({"status": "ok", "now": now, "current": current, "targets": targets})
 
@@ -943,18 +947,18 @@ def perform_barcode_request(account_id, barcode_type, debug_mode=False, cache_on
         cached = get_cached_barcode(account_id, barcode_type)
         if not debug_mode and cached and not force_scrape:
             resync_warm_schedule_from_cache(account_id, barcode_type, cached)
-            return barcode_response(cached["number"], cached.get("seconds_left", 0), cached.get("grade", ""), cached.get("stale", False))
+            return barcode_response(cached["number"], cached.get("seconds_left", 0), cached.get("grade", ""), cached.get("stale", False), cached.get("stale_seconds", 0))
         if cache_only:
             cached = get_cached_barcode(account_id, barcode_type, allow_stale=True)
             if not debug_mode and cached:
-                return barcode_response(cached["number"], cached.get("seconds_left", 0), cached.get("grade", ""), cached.get("stale", False))
+                return barcode_response(cached["number"], cached.get("seconds_left", 0), cached.get("grade", ""), cached.get("stale", False), cached.get("stale_seconds", 0))
             return "No cached barcode", 404
         lock_token = acquire_browser_lock(account_id)
         if UPSTASH_REDIS_REST_URL and UPSTASH_REDIS_REST_TOKEN and not lock_token:
             cached = get_cached_barcode(account_id, barcode_type, allow_stale=True)
             if not debug_mode and cached:
                 resync_warm_schedule_from_cache(account_id, barcode_type, cached)
-                return barcode_response(cached["number"], cached.get("seconds_left", 0), cached.get("grade", ""), cached.get("stale", False))
+                return barcode_response(cached["number"], cached.get("seconds_left", 0), cached.get("grade", ""), cached.get("stale", False), cached.get("stale_seconds", 0))
             resp = image_response(f"Another barcode refresh is already running\nID: {account_id}\nRetry shortly", color=(255, 248, 225))
             resp.status_code = 423
             resp.headers["Retry-After"] = "75"
