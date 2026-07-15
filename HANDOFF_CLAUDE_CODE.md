@@ -3,7 +3,7 @@
 Date: 2026-07-15 KST
 Repository: `https://github.com/a77ila2000/T`
 Production URL: `https://preedgaonprime.vercel.app`
-Main branch latest commit at this handoff: `77a2bc9 Remove dead code and stale files found during scheduled monitoring pass`
+Main branch latest commit at this handoff: `7d73897 Consolidate refresh path to warm_tick, batch Redis reads, dedupe frontend polling`
 
 ## Goal
 
@@ -34,10 +34,9 @@ The desired UX:
 - **Browser automation backend changed this session**: previously a paid Browserless.io cloud service; now a **self-hosted, open-source Browserless** (`browserless/chrome`, SSPL-1.0 license) Docker container on an Oracle Cloud "Always Free" ARM instance. See "Self-Hosted Browserless" below for full details and history.
 - Vercel rewrites expose:
   - `/api/get_barcode`
-  - `/api/warm_next`
-  - `/api/warm_done`
   - `/api/warm_status`
   - `/api/warm_tick`
+  - (`/api/warm_next` and `/api/warm_done` were **removed** this session - see "Refresh Path Consolidation" below)
 - **GitHub Actions workflow removed this session** (`.github/workflows/warm-barcodes.yml` deleted, commit `1126119`). Its free-tier `on: schedule` cron was confirmed via `gh run list` to fire wildly irregularly (multi-hour gaps instead of the configured 3 minutes) and was fully redundant with cron-job.org below.
 - **cron-job.org (external, free)**: hits `/api/warm_tick` every 1 minute. This is now the **sole external background driver**.
 - The frontend also drives refreshes client-side while a tab is open (`runWarmWorker()`, every 3 minutes plus event-driven triggers) - see "Current Frontend Behavior".
@@ -82,10 +81,10 @@ For a while this session, universe-type logins used a discovered shortcut: click
 - `api/get_barcode.py`
   - All login, barcode scraping/generation, Redis cache, lock, warm scheduler logic.
   - `perform_barcode_request(account_id, barcode_type, debug_mode=False, cache_only=False, force_scrape=False)` holds the actual login/scrape/cache logic; the Flask route `handler()` is a thin arg-parsing wrapper around it.
-  - `record_warm_result(target, token, success, http_code="")` is the shared state-recording logic used by both `/api/warm_done` and `/api/warm_tick`.
+  - `record_warm_result(target, token, success, http_code="")` records the outcome and releases the warm lock - called only by `warm_tick` now (see "Refresh Path Consolidation").
   - `poll_for_fresh_barcode(...)` - new this session, see "Early-Login-Lead" below.
-- `api/warm_next.py`, `api/warm_done.py`, `api/warm_status.py`, `api/warm_tick.py`
-  - Thin imports exposing the Flask app routes from `get_barcode.py`. Unchanged boilerplate.
+- `api/warm_status.py`, `api/warm_tick.py`
+  - Thin imports exposing the Flask app routes from `get_barcode.py`. Unchanged boilerplate. (`api/warm_next.py`/`api/warm_done.py` deleted this session along with the routes they exposed.)
 - `public/index.html`
   - Frontend cards, type tabs, cache polling, page-triggered warm worker, per-person status detail panel, per-card active/queued status, tab-visibility catch-up.
 - `public/style.css`
@@ -112,7 +111,7 @@ Locks:
 
 ```text
 barcode:warm-lock          (single global scheduler lock)
-barcode:warm-current       (what warm_next/warm_tick is currently working on, for status display)
+barcode:warm-current       (what warm_tick is currently working on, for status display)
 barcode:browserless-lock   (single global browser-session lock)
 ```
 
@@ -143,11 +142,19 @@ Redis is the sole source of truth for cache and scheduler state - there is no in
 On page load:
 
 - Creates three account cards, defaults each to `universe`.
-- Fetches visible universe cache with `cache_only=1`.
+- Fetches visible universe cache with `cache_only=1` (`refreshVisibleCaches()`, called once).
 - Starts `runWarmWorker()`.
-- Polls visible caches every 30s, warm status every 5s, and re-renders the live countdown every 1s from the last polled snapshot.
-- `visibilitychange`/`pageshow`/`focus` listeners immediately re-run the cache/status/warm-worker checks as soon as the tab becomes visible again (background tabs get `setInterval` throttled by the browser).
-- **New this session**: `refreshWarmStatus()` tracks each target's `last_success_at` and immediately re-fetches the visible barcode image the moment it moves forward - not just on the next 30s `refreshVisibleCaches()` tick. This closes a real UX bug: the status panel polls every 5s and would show a fresh countdown, while the actual displayed barcode image (only refetched every 30s previously) lagged up to 30s behind - and that 30s poll was the *only* thing that ever picked up a refresh triggered externally by cron-job.org's `warm_tick` (as opposed to one this tab's own `runWarmWorker` happened to drive, which already re-fetched immediately on success).
+- Polls warm status every 5s, re-renders the live countdown every 1s from the last polled snapshot.
+- `visibilitychange`/`pageshow`/`focus` listeners re-run the cache/status/warm-worker checks when the tab becomes visible again, **debounced 350ms** (these three events can fire within milliseconds of each other for the same real "tab reactivated" moment - added this session after the redundant-request review below).
+- `refreshWarmStatus()` tracks each target's `last_success_at` and immediately re-fetches the visible barcode image the moment it moves forward - this is now the **only** recurring re-fetch of the image (a prior session added this to close a lag bug; this session removed the then-redundant 30s `refreshVisibleCaches()` poll it made obsolete). Covers refreshes from this tab's own `runWarmWorker()` and ones triggered externally by cron-job.org equally.
+
+### Redundant-request cleanup (new this session)
+
+A review flagged several places the frontend was doing more network work than needed; verified and fixed:
+
+- Page load used to call `fetchBarcode` for all 3 accounts **twice** (once directly, once via `refreshVisibleCaches()` right after) - the direct loop was removed.
+- The recurring 30s `refreshVisibleCaches()` poll was removed entirely (see above) - it only ever mattered before the `last_success_at` watcher existed.
+- `fetchBarcode()` now guards against firing a duplicate request for the same account+type while one is already in flight (a separate `inFlightFetches` Set, keyed `accountId:type` - distinct from the pre-existing `fetchingCards` Set, which is keyed by `accountId` alone and only used to avoid clobbering in-progress status text).
 
 Status detail panel (`#warm-status-detail`):
 
@@ -184,7 +191,7 @@ Only one warm lock (`barcode:warm-lock`) and one browser lock (`barcode:browserl
 
 ### Early-Login-Lead (new this session, currently active)
 
-Since universe/general logins spend ~20-38s on navigation/recaptcha *before* they can read the barcode value, and the real barcode has usually already expired by the time that login finishes if triggered exactly at the due moment, `select_warm_target(now, lead_seconds=WARM_EARLY_LOGIN_LEAD_SECONDS)` lets a target be picked up to 20 seconds **before** its real `next_refresh_at`. `warm_tick`/`warm_next` detect this (`is_early = next_refresh_at > now`) and pass `force_scrape=True` into `perform_barcode_request()`, which:
+Since universe/general logins spend ~20-38s on navigation/recaptcha *before* they can read the barcode value, and the real barcode has usually already expired by the time that login finishes if triggered exactly at the due moment, `select_warm_target(now, lead_seconds=WARM_EARLY_LOGIN_LEAD_SECONDS)` lets a target be picked up to 20 seconds **before** its real `next_refresh_at`. `warm_tick` detects this (`is_early = next_refresh_at > now`) and passes `force_scrape=True` into `perform_barcode_request()`, which:
 
 1. Skips the normal "cache is still valid, just return it" short-circuit (only for this deliberately-early case - manual/`cache_only` requests are unaffected).
 2. After reading the barcode value, calls `poll_for_fresh_barcode()`: if the value still looks like the tail end of the old cycle (`seconds_left < 300`), it waits 2s and re-polls the *same already-logged-in page* (no new login) up to the scrape budget, until the real rotation is observed or time runs out.
@@ -197,15 +204,26 @@ This does **not** increase scrape frequency (still one attempt per ~20min cycle,
 
 Explicitly considered and **deferred** (not implemented): running universe and general for the same person as two truly concurrent Browserless sessions (instead of sequentially through the single global lock) to eliminate the residual ~20-40s gap where the second-in-queue type is still waiting. Would require relaxing the global browser lock to a 2-slot semaphore and a way to fan out two concurrent triggers from a single per-minute external cron tick (nontrivial on Vercel's serverless model - a function ends when it responds). Given the current server (`CONCURRENT=2` configured) has the raw capacity, this is *possible* but was judged not worth the risk relative to the modest remaining benefit, especially given this exact area (scheduling/concurrency) has produced two real bugs this session already. Revisit only if the current sequential gap becomes an actual observed problem.
 
+## Refresh Path Consolidation (new this session)
+
+Previously there were **two** independently-implemented paths that did the same thing: cron-job.org hitting `/api/warm_tick` (single request, does everything server-side), and the frontend's `runWarmWorker()` doing a 3-step dance (`warm_next` → `get_barcode?...&warm=1` → `warm_done`). A follow-up review (external code analysis, verified against the actual code before acting on it) pointed out the client path's middle step returned a barcode image that was **immediately discarded** (`await response.blob()` then thrown away) and re-fetched via a separate `cache_only` call anyway - so the 3-step flow was strictly more round trips for the same outcome.
+
+Fixed: `runWarmWorker()` now calls `/api/warm_tick` directly, same as cron-job.org. `warm_next()`/`warm_done()` routes, `api/warm_next.py`/`api/warm_done.py`, and their `vercel.json` entries are all removed. `record_warm_result()` is now called only by `warm_tick`. There is exactly one refresh code path now, used by both triggers.
+
+Also batched in the same pass: `select_warm_target()` and `warm_status()` used to loop over the 6 `WARM_TARGETS` doing one Redis `GET` per target (up to 13 sequential round trips for `warm_status`, which the frontend polls every 5s per open tab) - both now do a single `MGET` instead.
+
 ## Known Current Issues / Watch Points
 
-1. `warm_tick`/the client 3-step (`warm_next` → `get_barcode?warm=1` → `warm_done`) flow are two independently-implemented paths to the same effect, both gated by the same locks - not incorrect, just duplicated logic history (warm_tick came later as a simpler self-contained cron endpoint). Not worth unifying unless touching this area for another reason.
-2. Vercel serverless: if a request gets hard-killed past its `maxDuration`, the `finally` block (lock release) never runs - self-heals via each lock's own TTL (`WARM_LOCK_TTL=75`, browser lock `90s`). This is a known, accepted tradeoff, not a bug.
-3. A single transient warm-tick failure was observed and confirmed self-healing via the existing immediate-retry-on-first-failure logic (`compute_failure_retry_delay`) during this session's monitoring pass - working as designed.
-4. Browserless connection/timeouts can still surface as 502/504/423 (423 = another refresh already running; 502 = login/extraction failed; 504 = timed out) - expected occasional failure modes, handled by the retry/backoff logic.
+1. Vercel serverless: if a request gets hard-killed past its `maxDuration`, the `finally` block (lock release) never runs - self-heals via each lock's own TTL (`WARM_LOCK_TTL=75`, browser lock `90s`). This is a known, accepted tradeoff, not a bug.
+2. A single transient warm-tick failure was observed and confirmed self-healing via the existing immediate-retry-on-first-failure logic (`compute_failure_retry_delay`) during this session's monitoring pass - working as designed.
+3. Browserless connection/timeouts can still surface as 502/504/423 (423 = another refresh already running; 502 = login/extraction failed; 504 = timed out) - expected occasional failure modes, handled by the retry/backoff logic.
+4. Deferred (reviewed, not applied): staging `submit_tid_credentials()`'s login-button submission more defensively (check between each attempt instead of firing several unconditionally once past the first early-exit check), and distinguishing required-vs-optional `goto_page()` navigations so a failed required hop fails fast instead of relying solely on the overall `mark()` time budget to catch it. Both touch the most fragile, most-tuned part of the codebase for a comparatively small payoff - revisit only if actually causing observed failures.
+5. Bigger, deliberately-not-started idea: move the warm-refresh worker off Vercel entirely and run it as a persistent process directly on the Oracle ARM server (which already hosts Browserless) - would eliminate the CDP-over-network hop, Vercel's 60s budget pressure, the external cron dependency, and the Redis-based distributed locking, since a single local process naturally serializes without needing any of that. Real potential, but a separate architecture project, not a quick patch.
 
 ## Recent Commit Timeline (this multi-day session, newest first)
 
+- `7d73897` - Consolidate refresh path to warm_tick, batch Redis reads, dedupe frontend polling
+- `159ab21` - Bring HANDOFF_CLAUDE_CODE.md up to date with the full 2026-07-13/15 session
 - `77a2bc9` - Remove dead code and stale files found during scheduled monitoring pass
 - `26494d3` - Stop flashing the loading/generating status during quiet background cache polls
 - `68d494d` - Reapply early-login-lead after confirming the real bug was elsewhere
@@ -260,7 +278,7 @@ curl.exe -s -S --max-time 70 $url
 Run before commit:
 
 ```powershell
-python -m py_compile api\get_barcode.py api\warm_next.py api\warm_done.py api\warm_status.py api\warm_tick.py
+python -m py_compile api\get_barcode.py api\warm_status.py api\warm_tick.py
 node -e "const fs=require('fs');const html=fs.readFileSync('public/index.html','utf8');const m=html.match(/<script>([\s\S]*)<\/script>/); new Function(m[1]); console.log('JS_OK')"
 if (Test-Path api\__pycache__) { Remove-Item -Recurse -Force api\__pycache__ }
 git diff --check
@@ -268,11 +286,12 @@ git diff --check
 
 ## Last Observed Production State
 
-Observed 2026-07-15, during a 2-hour scheduled monitoring/cleanup pass:
+Observed 2026-07-15, during a 2-hour scheduled monitoring/cleanup pass, and again right after the refresh-path consolidation deploy:
 
 - All six slots healthy across multiple checks; no 5xx errors or timeouts seen across several minutes of live log watching.
 - Watched the early-login-lead mechanism succeed live in production twice (어머니 pair and 아버지 pair), each completing within ~40s of real expiry.
 - Watched one transient warm-tick failure self-heal via the immediate-retry logic within ~40s.
 - Confirmed no remaining references to the two terminated Oracle AMD servers anywhere in code.
+- After the consolidation deploy: confirmed `/api/warm_next` and `/api/warm_done` now 404, `/api/warm_status`/`/api/warm_tick` still respond correctly, and a real browser load only fires 3 `get_barcode` requests (one per account) instead of 6 - verified via network log inspection, no console errors, barcode image and status panel both rendering correctly.
 
 Treat this as a snapshot, not a guarantee - re-run the diagnostics above to check current state.
