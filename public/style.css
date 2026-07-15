@@ -40,9 +40,13 @@ header h1 {
 }
 
 .warm-status-detail .row {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
+    /* Grid (not flex) so the 우주/일반 columns line up across every row regardless of how
+       long each row's time text is - flex with a gap let the value-group as a whole shift
+       left/right per row since its total width varied with the text length. */
+    display: grid;
+    grid-template-columns: 2.8em 2.3em minmax(0, 1fr) 2.3em minmax(0, 1fr);
+    align-items: baseline;
+    column-gap: 0.4rem;
     padding: 0.4rem 0;
     border-bottom: 1px solid var(--border-color);
 }
@@ -54,19 +58,6 @@ header h1 {
 .warm-status-detail .label {
     color: var(--text-color);
     font-weight: 500;
-    flex-shrink: 0;
-}
-
-.warm-status-detail .value-group {
-    display: flex;
-    gap: 1rem;
-}
-
-.warm-status-detail .value-item {
-    display: flex;
-    align-items: baseline;
-    gap: 0.3rem;
-    white-space: nowrap;
 }
 
 .warm-status-detail .value-type {
@@ -76,6 +67,8 @@ header h1 {
 
 .warm-status-detail .value {
     color: var(--text-light);
+    font-size: 0.82rem;
+    overflow-wrap: break-word;
 }
 
 .warm-status-detail .value.fresh {

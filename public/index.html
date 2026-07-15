@@ -289,42 +289,37 @@
                 }
             }
 
-            function formatSecondsLeft(seconds) {
+            function formatMinSec(seconds) {
                 const total = Math.max(0, Math.floor(seconds));
                 const m = Math.floor(total / 60);
                 const s = total % 60;
-                return `${m}:${String(s).padStart(2, '0')} 남음`;
-            }
-
-            function formatStaleFor(seconds) {
-                const total = Math.max(0, Math.floor(seconds));
-                const m = Math.floor(total / 60);
-                const s = total % 60;
-                return `만료됨 (${m}:${String(s).padStart(2, '0')} 경과)`;
+                return `${m}:${String(s).padStart(2, '0')}`;
             }
 
             function targetStatusFor(target, current, dueTargets, elapsedSec) {
                 const isActive = Boolean(current && current.id === target.id && current.type === target.type);
                 const queuePosition = dueTargets.findIndex(t => t.id === target.id && t.type === target.type);
-                if (isActive) {
-                    return { valueText: '갱신 중', valueClass: 'active' };
-                }
-                if (queuePosition !== -1) {
-                    return { valueText: `대기 ${queuePosition + 1}번째`, valueClass: 'queued' };
-                }
                 // Countdown client-side between server polls so the display ticks every
                 // second instead of only updating on the next ~5s warm_status refresh.
-                const remaining = Math.max(0, Number(target.seconds_left || 0) - elapsedSec);
-                if (remaining <= 0) {
-                    // target.stale_seconds is how long it had already been expired as of the
-                    // last poll; elapsedSec is time since that poll, minus any of target's own
-                    // seconds_left that hadn't yet run out at poll time (covers the case where
-                    // this branch is reached by the client's own countdown predicting expiry
-                    // before the server has confirmed it).
-                    const staleFor = Number(target.stale_seconds || 0) + elapsedSec - Number(target.seconds_left || 0);
-                    return { valueText: formatStaleFor(staleFor), valueClass: 'stale' };
+                const remaining = Number(target.seconds_left || 0) - elapsedSec;
+                // target.stale_seconds is how long it had already been expired as of the last
+                // poll; elapsedSec is time since that poll, minus any of target's own
+                // seconds_left that hadn't yet run out at poll time (covers the case where
+                // this is reached by the client's own countdown predicting expiry before the
+                // server has confirmed it). Active/queued targets are always past due, so this
+                // is the right time value to show alongside those states too, not just "stale".
+                const staleFor = Number(target.stale_seconds || 0) + elapsedSec - Number(target.seconds_left || 0);
+
+                if (isActive) {
+                    return { valueText: `갱신 중 (${formatMinSec(staleFor)} 경과)`, valueClass: 'active' };
                 }
-                return { valueText: formatSecondsLeft(remaining), valueClass: 'fresh' };
+                if (queuePosition !== -1) {
+                    return { valueText: `대기 ${queuePosition + 1}번째 (${formatMinSec(staleFor)} 경과)`, valueClass: 'queued' };
+                }
+                if (remaining <= 0) {
+                    return { valueText: `만료됨 (${formatMinSec(staleFor)} 경과)`, valueClass: 'stale' };
+                }
+                return { valueText: `${formatMinSec(remaining)} 남음`, valueClass: 'fresh' };
             }
 
             function renderWarmStatusDetail() {
@@ -345,10 +340,10 @@
                     const gen = entry.general || { valueText: '-', valueClass: '' };
                     return `<div class="row">
                         <span class="label">${account.user}</span>
-                        <span class="value-group">
-                            <span class="value-item"><span class="value-type">우주</span><span class="value ${uni.valueClass}">${uni.valueText}</span></span>
-                            <span class="value-item"><span class="value-type">일반</span><span class="value ${gen.valueClass}">${gen.valueText}</span></span>
-                        </span>
+                        <span class="value-type">우주</span>
+                        <span class="value ${uni.valueClass}">${uni.valueText}</span>
+                        <span class="value-type">일반</span>
+                        <span class="value ${gen.valueClass}">${gen.valueText}</span>
                     </div>`;
                 }).join('');
                 detail.innerHTML = rows;

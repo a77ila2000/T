@@ -379,13 +379,38 @@ def screenshot_bytes(page):
     return base64.b64decode(client.send("Page.captureScreenshot", {"format": "png", "fromSurface": True})["data"])
 
 
+def encode_code128_c(digits):
+    # Code 128 Set C: pairs of digits per symbol (00-99) instead of one digit per symbol
+    # (Set B, the previous implementation) - the standard, more compact encoding for
+    # numeric-only data, and what the official T membership app's barcode uses. Both are
+    # equally valid Code128 and should scan to the identical digit string either way (the
+    # symbology is self-describing), so this is a format-parity change, not a correctness
+    # fix. Verified against the `python-barcode` library: identical symbol sequence and
+    # checksum for our actual 16-digit barcode numbers.
+    if len(digits) % 2 == 1:
+        # Odd length (not expected for real barcode numbers, which are consistently 16
+        # digits, but handled defensively): Code C for all leading pairs, then switch to
+        # Code B (code value 100) for the trailing single digit - matches how
+        # python-barcode itself encodes an odd-length numeric string.
+        codes = [105]
+        for i in range(0, len(digits) - 1, 2):
+            codes.append(int(digits[i:i + 2]))
+        codes.append(100)
+        codes.append(ord(digits[-1]) - 32)
+    else:
+        codes = [105]
+        for i in range(0, len(digits), 2):
+            codes.append(int(digits[i:i + 2]))
+    return codes
+
+
 def barcode_response(number, seconds_left=1200, grade="", stale=False, stale_seconds=0):
     from PIL import Image, ImageDraw, ImageFont
     number = re.sub(r"\D", "", str(number))
     if not number:
         return image_response("Barcode number is empty")
-    codes = [104] + [ord(ch) - 32 for ch in number]
-    checksum = 104 + sum(value * idx for idx, value in enumerate(codes[1:], 1))
+    codes = encode_code128_c(number)
+    checksum = codes[0] + sum(value * idx for idx, value in enumerate(codes[1:], 1))
     codes += [checksum % 103, 106]
     module, quiet, bar_height, text_height = 3, 30, 150, 46
     width = quiet * 2 + sum(sum(int(w) for w in CODE128_PATTERNS[code]) for code in codes) * module
