@@ -21,7 +21,6 @@ TID_AUTHORIZE_URL = "https://tapi.t-id.co.kr/oidc/v20/authorize?client_id=a1c144
 TWORLD_MY_URL = "https://m.tworld.co.kr/v6/my?returnUrl=https://m.tworld.co.kr/v6/main"
 TWORLD_LOGIN_URL = "https://m.tworld.co.kr/common/tid/login?target=/v6/my"
 MOBILE_USER_AGENT = "Mozilla/5.0 (Linux; Android 13; SM-G981B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Mobile Safari/537.36"
-BARCODE_CACHE = {}
 WARM_TARGETS = [
     {"id": "a77ila2000", "type": "universe", "name": "me-universe"},
     {"id": "a77ila10004", "type": "universe", "name": "mother-universe"},
@@ -171,7 +170,6 @@ def release_browser_lock(token):
 
 def get_cached_barcode(account_id, barcode_type="universe", allow_stale=False):
     barcode_type = normalize_barcode_type(barcode_type)
-    memory_key = f"{barcode_type}:{account_id}"
     now = time.time()
 
     raw = redis_command(["GET", cache_key(account_id, barcode_type)])
@@ -185,7 +183,6 @@ def get_cached_barcode(account_id, barcode_type="universe", allow_stale=False):
         value["stale"] = value.get("expires_at", 0) <= now + 5
         if value["stale"] and not allow_stale:
             return None
-        BARCODE_CACHE[memory_key] = value
         return value
     except Exception as exc:
         print(f"redis cache parse failed: {exc}", flush=True)
@@ -233,7 +230,6 @@ def set_cached_barcode(account_id, number, seconds_left, barcode_type="universe"
         "grade": str(grade or ""),
         "created_at": time.time(),
     }
-    BARCODE_CACHE[f"{barcode_type}:{account_id}"] = value
     write_result = redis_command(["SET", cache_key(account_id, barcode_type), json.dumps(value), "EX", LAST_BARCODE_RETENTION])
     target = next((item for item in WARM_TARGETS if item["id"] == account_id and item["type"] == barcode_type), None)
     if target:
@@ -358,11 +354,6 @@ def goto_page(page, url, timeout=9000, referer=None):
 def screenshot_bytes(page):
     client = page.context.new_cdp_session(page)
     return base64.b64decode(client.send("Page.captureScreenshot", {"format": "png", "fromSurface": True})["data"])
-
-
-def screenshot_response(page):
-    try: return Response(screenshot_bytes(page), mimetype="image/png")
-    except Exception as exc: return image_response(f"screenshot failed: {exc}. url={safe_url(page)} body={get_body_text(page)}")
 
 
 def barcode_response(number, seconds_left=1200, grade="", stale=False):
@@ -664,36 +655,6 @@ def wait_for_my_ready(page, timeout_ms=5000):
     return False
 
 
-def open_tworld_after_tid_login(page, target):
-    goto_page(page, TWORLD_LOGIN_URL, timeout=12000)
-    page.wait_for_timeout(1800)
-    if "auth.skt-id.co.kr" in safe_url(page):
-        try:
-            wait_for_tid_login_form(page, 2500)
-            print("debug tworld requested T ID login again", flush=True)
-            print("typed user selector:", type_first_visible(page, ["input#inputId", "input#userId", "input[name='userId']", "input[name='id']", "input[type='email']", "input[type='text']"], target["id"], 6000), flush=True)
-            print("typed password selector:", type_first_visible(page, ["input#inputPassword", "input#password", "input[name='password']", "input[name='passwd']", "input[type='password']"], target["password"], 6000), flush=True)
-            try:
-                page.locator("button:has-text('Login'), input[type='submit'], button").last.click(force=True, timeout=2200)
-            except Exception as exc:
-                print(f"tworld login button locator failed: {exc}", flush=True)
-            page.wait_for_timeout(200)
-            physical_tap_at(page, 206, 470)
-            page.wait_for_timeout(200)
-            force_submit(page)
-        except Exception as exc:
-            print(f"debug tworld T ID relogin skipped: {type(exc).__name__}: {exc}", flush=True)
-    end = time.monotonic() + 12
-    while time.monotonic() < end:
-        if "m.tworld.co.kr" in safe_url(page):
-            break
-        page.wait_for_timeout(300)
-    if "m.tworld.co.kr" not in safe_url(page):
-        goto_page(page, TWORLD_MY_URL, timeout=12000)
-    page.wait_for_timeout(1200)
-    wait_for_my_ready(page, 6000)
-
-
 def submit_tid_credentials(page, target, label=""):
     prefix = f"{label} " if label else ""
     ensure_idpw_login_mode(page)
@@ -811,9 +772,10 @@ def record_warm_result(target, token, success, http_code=""):
     now = int(time.time())
     existing = get_warm_state(target)
     if success:
-        # set_cached_barcode already recorded the correct next_refresh_at for this
-        # refresh (ttl-aware and staggered against the sibling barcode type) as part
-        # of the get_barcode call - don't clobber it with a flat +20m here.
+        # set_cached_barcode already recorded the correct ttl-aware next_refresh_at
+        # for this refresh as part of the get_barcode call - don't clobber it with a
+        # flat +20m here. (No sibling staggering happens here or anywhere else -
+        # that was tried and reverted, see the comment near WARM_SUCCESS_INTERVAL.)
         state = dict(existing)
         state.setdefault("next_refresh_at", now + WARM_SUCCESS_INTERVAL)
         state["last_http_code"] = http_code

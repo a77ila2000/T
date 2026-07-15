@@ -110,7 +110,7 @@
             });
 
             accounts.forEach(account => {
-                fetchBarcode(account.id, 'universe', { cacheOnly: true, preserveDisplay: true, quietMiss: true });
+                fetchBarcode(account.id, 'universe', { cacheOnly: true, preserveDisplay: true });
             });
             runWarmWorker();
             refreshVisibleCaches();
@@ -158,7 +158,7 @@
                 card.dataset.currentType = barcodeType;
                 updateTypeButtons(accountId, barcodeType);
                 updateBenefits(accountId, barcodeType);
-                fetchBarcode(accountId, barcodeType, { cacheOnly: true, preserveDisplay: true, quietMiss: true });
+                fetchBarcode(accountId, barcodeType, { cacheOnly: true, preserveDisplay: true });
             }
 
             function updateTypeButtons(accountId, barcodeType) {
@@ -185,9 +185,6 @@
             function enqueueBarcode(accountId, barcodeType, options = {}) {
                 const key = queueKey(accountId, barcodeType);
                 if (queuedKeys.has(key)) {
-                    const card = document.getElementById(`card-${accountId}`);
-                    const statusEl = card.querySelector('.status');
-                    if (statusEl && options.manual) statusEl.textContent = '이미 갱신 대기 중입니다.';
                     return;
                 }
                 queuedKeys.add(key);
@@ -217,8 +214,7 @@
                     if (!card) return;
                     fetchBarcode(account.id, card.dataset.currentType || 'universe', {
                         cacheOnly: true,
-                        preserveDisplay: true,
-                        quietMiss: true
+                        preserveDisplay: true
                     });
                 });
             }
@@ -253,7 +249,7 @@
                         if (previousSuccessAt !== undefined && currentSuccessAt > previousSuccessAt) {
                             const card = document.getElementById(`card-${target.id}`);
                             if (card && card.dataset.currentType === target.type && !fetchingCards.has(target.id)) {
-                                fetchBarcode(target.id, target.type, { cacheOnly: true, preserveDisplay: false, quietMiss: true });
+                                fetchBarcode(target.id, target.type, { cacheOnly: true, preserveDisplay: false });
                             }
                         }
                         lastKnownSuccessAt[key] = currentSuccessAt;
@@ -388,7 +384,7 @@
                         await response.blob();
                         const card = document.getElementById(`card-${next.id}`);
                         if (card && card.dataset.currentType === next.type) {
-                            fetchBarcode(next.id, next.type, { cacheOnly: true, preserveDisplay: false, quietMiss: true });
+                            fetchBarcode(next.id, next.type, { cacheOnly: true, preserveDisplay: false });
                         }
                     }
                 } catch (error) {
@@ -451,7 +447,7 @@
                 if (!preserveDisplay) {
                     loader.classList.remove('hidden');
                     buttons.forEach(button => button.disabled = true);
-                    statusEl.textContent = options.auto ? `${barcodeTypes[barcodeType]} 자동 갱신 중입니다...` : `${barcodeTypes[barcodeType]}를 실시간으로 생성 중입니다...`;
+                    statusEl.textContent = `${barcodeTypes[barcodeType]}를 실시간으로 생성 중입니다...`;
                 }
 
                 try {
@@ -485,8 +481,6 @@
                         statusEl.textContent = `${retryAfter}초 후 다시 시도합니다.`;
                         img.dataset.retryUntil = String(Date.now() + retryAfter * 1000);
                         setTimeout(() => enqueueBarcode(accountId, barcodeType, {
-                            auto: options.auto,
-                            manual: options.manual,
                             preserveDisplay: true
                         }), retryAfter * 1000);
                         return;
