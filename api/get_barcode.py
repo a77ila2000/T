@@ -842,10 +842,23 @@ def warm_tick():
     lock_token = acquire_warm_lock()
     if not lock_token:
         return json_response({"status": "locked", "retry_after": 60})
+    # Short per-request tag for correlating log lines - Vercel's log stream interleaves
+    # concurrent requests and has occasionally dropped/reordered lines under load (observed
+    # while debugging the chaining feature below), so every line in this request includes
+    # [tag] to let `grep tag=XXXXXX` reconstruct one request's full trace unambiguously.
+    tag = lock_token.split(":")[-1][-6:]
     target, state = select_warm_target(now)
     if not target:
         release_warm_lock(lock_token)
+        print(f"debug warm_tick[{tag}] no_due now={now}", flush=True)
         return json_response({"status": "no_due", "now": now})
+
+    print(
+        f"debug warm_tick[{tag}] START now={now} selected={target['id']}/{target['type']} "
+        f"selected_due_at={int(state.get('next_refresh_at') or 0)} "
+        f"selected_due_in={int(state.get('next_refresh_at') or 0) - now}s",
+        flush=True,
+    )
 
     # Same-account sibling chaining (universe<->general) - see the comment near
     # WARM_TICK_OVERALL_DEADLINE_SECONDS. Capped at 2 iterations: this loop only ever
@@ -868,6 +881,12 @@ def warm_tick():
 
         remaining_before = WARM_TICK_OVERALL_DEADLINE_SECONDS - (time.monotonic() - started_overall)
         call_budget = min(SCRAPE_BUDGET_SECONDS, max(10, remaining_before))
+        print(
+            f"debug warm_tick[{tag}] iter={len(results)} starting {current_target['id']}/{current_target['type']} "
+            f"is_early={is_early} budget={call_budget:.1f}s elapsed_so_far={time.monotonic() - started_overall:.1f}s",
+            flush=True,
+        )
+        call_started = time.monotonic()
         try:
             result = perform_barcode_request(
                 current_target["id"], current_target["type"], force_scrape=is_early, budget_seconds=call_budget
@@ -883,9 +902,15 @@ def warm_tick():
             # kicks in on repeat contention, instead of retrying every few seconds forever.
             success = http_code == 200 and content_type.startswith("image/") and not is_fallback
         except Exception as exc:
-            print(f"warm_tick failed for {current_target['id']}/{current_target['type']}: {type(exc).__name__}: {exc}", flush=True)
+            print(f"warm_tick[{tag}] failed for {current_target['id']}/{current_target['type']}: {type(exc).__name__}: {exc}", flush=True)
             http_code = 500
             success = False
+            is_fallback = False
+        print(
+            f"debug warm_tick[{tag}] iter={len(results)} finished {current_target['id']}/{current_target['type']} "
+            f"http_code={http_code} success={success} fallback={is_fallback} took={time.monotonic() - call_started:.1f}s",
+            flush=True,
+        )
 
         sibling = sibling_target(current_target)
         sibling_state = get_warm_state(sibling) if sibling else {}
@@ -898,8 +923,9 @@ def warm_tick():
             and sibling_due_at <= int(time.time()) + WARM_EARLY_LOGIN_LEAD_SECONDS
         )
         print(
-            f"debug chain check after {current_target['id']}/{current_target['type']}: "
-            f"sibling={sibling['type'] if sibling else None} sibling_due_in={sibling_due_at - int(time.time())}s "
+            f"debug warm_tick[{tag}] chain check after {current_target['id']}/{current_target['type']}: "
+            f"sibling={sibling['type'] if sibling else None} sibling_due_at={sibling_due_at} "
+            f"sibling_due_in={sibling_due_at - int(time.time())}s "
             f"remaining_after={remaining_after:.1f}s will_chain={will_chain}",
             flush=True,
         )
@@ -917,6 +943,8 @@ def warm_tick():
         if not will_chain:
             break
         current_target, current_state = sibling, sibling_state
+
+    print(f"debug warm_tick[{tag}] DONE results={results}", flush=True)
 
     last = results[-1]
     return json_response({
