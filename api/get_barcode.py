@@ -82,8 +82,14 @@ SCRAPE_BUDGET_SECONDS = 50
 # attempting a second login for (general's own login is ~15-25s) - below that, chaining
 # would likely just time out mid-flight and waste the browser lock, so it's skipped and the
 # sibling falls back to the next external trigger, same as before this change.
-WARM_TICK_OVERALL_DEADLINE_SECONDS = 55
-WARM_CHAIN_MIN_BUDGET_SECONDS = 25
+WARM_TICK_OVERALL_DEADLINE_SECONDS = 57
+# 25s was too conservative in practice - a real universe early-lead attempt (with polling)
+# observed taking ~31s left only ~24s of the 55s deadline, missing the old 25s bar by 1s and
+# skipping the chain entirely. Lowered along with raising the deadline above (55->57) to
+# actually leave room for the common case, at the cost of a slightly tighter fit for general's
+# own login on the rare slower attempt - which just falls back to a normal failure/retry on
+# the next external trigger, no worse than before this feature existed.
+WARM_CHAIN_MIN_BUDGET_SECONDS = 18
 
 
 class ScrapeTimeout(Exception):
@@ -884,6 +890,12 @@ def warm_tick():
             and len(results) == 0
             and remaining_after >= WARM_CHAIN_MIN_BUDGET_SECONDS
             and sibling_due_at <= int(time.time()) + WARM_EARLY_LOGIN_LEAD_SECONDS
+        )
+        print(
+            f"debug chain check after {current_target['id']}/{current_target['type']}: "
+            f"sibling={sibling['type'] if sibling else None} sibling_due_in={sibling_due_at - int(time.time())}s "
+            f"remaining_after={remaining_after:.1f}s will_chain={will_chain}",
+            flush=True,
         )
 
         result_state = record_warm_result(current_target, lock_token, success, str(http_code), release_lock=not will_chain)
