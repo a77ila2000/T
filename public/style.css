@@ -44,9 +44,9 @@ header h1 {
        long each row's time text is - flex with a gap let the value-group as a whole shift
        left/right per row since its total width varied with the text length. */
     display: grid;
-    grid-template-columns: 2.8em 2.3em minmax(0, 1fr) 2.3em minmax(0, 1fr);
+    grid-template-columns: 3.8em 2.3em minmax(0, 1fr) 2.3em minmax(0, 1fr);
     align-items: baseline;
-    column-gap: 0.4rem;
+    column-gap: 0.5rem;
     padding: 0.4rem 0;
     border-bottom: 1px solid var(--border-color);
 }
@@ -58,6 +58,10 @@ header h1 {
 .warm-status-detail .label {
     color: var(--text-color);
     font-weight: 500;
+    /* 어머니/아버지 (3 Korean characters) nearly filled the old 2.8em column, leaving no
+       visible gap before the 우주 column started - widen the track and reserve a little
+       extra so there's always breathing room regardless of name length. */
+    padding-right: 0.3rem;
 }
 
 .warm-status-detail .value-type {
