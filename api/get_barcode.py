@@ -404,11 +404,23 @@ def encode_code128_c(digits):
     return codes
 
 
-def barcode_response(number, seconds_left=1200, grade="", stale=False, stale_seconds=0):
+_BARCODE_PNG_CACHE = {}
+_BARCODE_PNG_CACHE_MAX = 32
+
+
+def render_barcode_png(number):
+    # The drawn pixels depend only on the digit string, not on seconds_left/grade/stale
+    # (those only affect response headers) - so the same number always renders to the exact
+    # same bytes. Vercel Fluid compute keeps the Python process warm across invocations, and
+    # this function's hot path (every page view, tab refocus, 5s status poll) requests the
+    # *same* still-valid number over and over between real refreshes (~20min apart), so
+    # re-drawing it pixel-by-pixel every single time was pure repeated CPU work. Caching by
+    # number alone (module-level dict, survives across requests within a warm instance) means
+    # each number is drawn once until it actually changes.
+    cached = _BARCODE_PNG_CACHE.get(number)
+    if cached is not None:
+        return cached
     from PIL import Image, ImageDraw, ImageFont
-    number = re.sub(r"\D", "", str(number))
-    if not number:
-        return image_response("Barcode number is empty")
     codes = encode_code128_c(number)
     checksum = codes[0] + sum(value * idx for idx, value in enumerate(codes[1:], 1))
     codes += [checksum % 103, 106]
@@ -428,7 +440,18 @@ def barcode_response(number, seconds_left=1200, grade="", stale=False, stale_sec
     bbox = draw.textbbox((0, 0), number, font=font)
     draw.text(((width - (bbox[2] - bbox[0])) / 2, bar_height + 20), number, fill="black", font=font)
     out = io.BytesIO(); img.save(out, format="PNG")
-    resp = Response(out.getvalue(), mimetype="image/png")
+    png_bytes = out.getvalue()
+    if len(_BARCODE_PNG_CACHE) >= _BARCODE_PNG_CACHE_MAX:
+        _BARCODE_PNG_CACHE.pop(next(iter(_BARCODE_PNG_CACHE)))
+    _BARCODE_PNG_CACHE[number] = png_bytes
+    return png_bytes
+
+
+def barcode_response(number, seconds_left=1200, grade="", stale=False, stale_seconds=0):
+    number = re.sub(r"\D", "", str(number))
+    if not number:
+        return image_response("Barcode number is empty")
+    resp = Response(render_barcode_png(number), mimetype="image/png")
     resp.headers["Cache-Control"] = "no-store, max-age=0"
     resp.headers["X-Barcode-Number"] = number
     resp.headers["X-Barcode-Seconds-Left"] = str(max(0, int(seconds_left or 0)))
@@ -977,11 +1000,15 @@ def perform_barcode_request(account_id, barcode_type, debug_mode=False, cache_on
         except Exception as exc:
             print(f"debug scrape alarm unavailable: {type(exc).__name__}: {exc}", flush=True)
     try:
-        stage = "decrypt_accounts"; mark(stage)
-        accounts = decrypt_accounts()
-        target = next((acc for acc in accounts if acc["id"] == account_id), None)
-        if not target:
-            return f"Account not found: {account_id}", 404
+        # decrypt_accounts() (Fernet decrypt + JSON parse of all 3 accounts) used to run
+        # unconditionally here, before either cache check below - meaning it ran on every
+        # single cache-hit request too (by far the most frequent path: every page load, tab
+        # refocus, and 5s status poll from every open tab), even though `target` is only
+        # actually needed once we're past both cache checks and about to attempt a real
+        # scrape. Deferring it to just before that point cuts real CPU work off the hot path
+        # without changing behavior - an invalid account_id still ends up at the same 404
+        # "Account not found", just reached after the (already-guaranteed-to-miss) cache
+        # checks instead of before them.
         cached = get_cached_barcode(account_id, barcode_type)
         if not debug_mode and cached and not force_scrape:
             resync_warm_schedule_from_cache(account_id, barcode_type, cached)
@@ -991,6 +1018,11 @@ def perform_barcode_request(account_id, barcode_type, debug_mode=False, cache_on
             if not debug_mode and cached:
                 return barcode_response(cached["number"], cached.get("seconds_left", 0), cached.get("grade", ""), cached.get("stale", False), cached.get("stale_seconds", 0))
             return "No cached barcode", 404
+        stage = "decrypt_accounts"; mark(stage)
+        accounts = decrypt_accounts()
+        target = next((acc for acc in accounts if acc["id"] == account_id), None)
+        if not target:
+            return f"Account not found: {account_id}", 404
         lock_token = acquire_browser_lock(account_id)
         if UPSTASH_REDIS_REST_URL and UPSTASH_REDIS_REST_TOKEN and not lock_token:
             cached = get_cached_barcode(account_id, barcode_type, allow_stale=True)
