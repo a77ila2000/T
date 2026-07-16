@@ -314,7 +314,7 @@ def release_warm_lock(token):
         print(f"warm lock release failed: {exc}", flush=True)
 
 
-def record_warm_result(target, token, success, http_code=""):
+def record_warm_result(target, token, success, http_code="", release_lock=True):
     now = int(time.time())
     existing = get_warm_state(target)
     if success:
@@ -344,7 +344,8 @@ def record_warm_result(target, token, success, http_code=""):
             "last_http_code": http_code,
         }
     set_warm_state(target, state)
-    release_warm_lock(token)
+    if release_lock:
+        release_warm_lock(token)
     return state
 
 

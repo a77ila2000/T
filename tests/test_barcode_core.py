@@ -103,6 +103,21 @@ class TestRecordWarmResult:
         state = bc.record_warm_result(target, "tok", success=True, http_code="200")
         assert state.get("consecutive_failures") == 0
 
+    def test_batch_caller_can_defer_warm_lock_release(self, _isolate_redis, monkeypatch):
+        target = {"id": "a77ila2000", "type": "universe", "name": "me-universe"}
+        releases = []
+        monkeypatch.setattr(bc, "release_warm_lock", lambda token: releases.append(token))
+
+        bc.record_warm_result(
+            target,
+            "pair-token",
+            success=True,
+            http_code="200",
+            release_lock=False,
+        )
+
+        assert releases == []
+
     def test_failure_backoff_schedule_is_bounded(self, _isolate_redis):
         target = {"id": "a77ila2000", "type": "universe", "name": "me-universe"}
         delays = []
