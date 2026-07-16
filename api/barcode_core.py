@@ -684,6 +684,7 @@ def submit_tid_credentials(page, target, label=""):
     # was the root cause of general-barcode refresh failing on every single attempt.
     if "auth.skt-id.co.kr" not in safe_url(page):
         return
+    dom_click_error = None
     try:
         clicked = page.evaluate("""
         () => {
@@ -709,10 +710,14 @@ def submit_tid_credentials(page, target, label=""):
         if "auth.skt-id.co.kr" not in safe_url(page):
             print(prefix + "debug dom submit superseded by navigation", flush=True)
             return
-        print(prefix + f"debug dom login click failed: {exc}", flush=True)
+        dom_click_error = exc
     page.wait_for_timeout(500)
     if "auth.skt-id.co.kr" not in safe_url(page):
+        if dom_click_error is not None:
+            print(prefix + "debug dom submit completed during navigation grace", flush=True)
         return
+    if dom_click_error is not None:
+        print(prefix + f"debug dom login click failed: {dom_click_error}", flush=True)
     try:
         page.locator("button:has-text('로그인'), button:has-text('Login'), input[type='submit'], button").last.click(force=True, timeout=2200)
         print(prefix + "debug locator force click submit", flush=True)
