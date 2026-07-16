@@ -3,8 +3,23 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <!-- Declare the page's real dark theme so Samsung Internet does not run its own
+         force-dark image heuristic over the already-dark UI. Keep the functional barcode
+         region explicitly light, including when an older external stylesheet is cached. -->
+    <meta name="color-scheme" content="light dark">
     <title>T우주 가족 바코드</title>
-    <link rel="stylesheet" href="style.css">
+    <style>
+        :root { color-scheme: light dark; }
+        .barcode-container,
+        .barcode-container img {
+            color-scheme: only light !important;
+            forced-color-adjust: none;
+            background-color: #ffffff !important;
+            filter: none !important;
+            -webkit-filter: none !important;
+        }
+    </style>
+    <link rel="stylesheet" href="style.css?v=20260716-dark-barcode-2">
 </head>
 <body>
     <div class="dashboard">
