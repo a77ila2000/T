@@ -65,7 +65,7 @@ Upstash Redis is the cache and scheduler state source (sole source of truth - se
 - Cross-origin response and exposed-header settings allow the Vercel static page to read Oracle directly without a proxy.
 - `oracle/tworld-api.service` runs one Gunicorn worker with two threads on `127.0.0.1:8080`.
 - `oracle/Caddyfile` terminates HTTPS for `168-138-194-2.sslip.io`, proxies `/api/*` and `/healthz`, and serves `public/` as the Vercel-independent fallback page.
-- Oracle Cloud's security list must allow inbound TCP 80 and 443 for Caddy certificate issuance and HTTPS traffic. Browserless remains on port 3000 for the refresh worker.
+- Oracle Cloud's security list and the Ubuntu host `iptables` rules must both allow inbound TCP 80 and 443 for Caddy certificate issuance and HTTPS traffic. Save host rules with `netfilter-persistent save` so they survive reboot. Browserless remains on port 3000 for the refresh worker.
 - Deploy the unit to `/etc/systemd/system/tworld-api.service`, the Caddyfile to `/etc/caddy/Caddyfile`, then run `systemctl daemon-reload`, `systemctl enable --now tworld-api caddy`.
 
 ## Self-Hosted Browserless (new this session)
