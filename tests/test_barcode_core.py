@@ -150,6 +150,47 @@ class TestRecordWarmResult:
 
 
 class TestSubmitTidCredentialsStopsOnceNavigatedAway:
+    def test_dom_evaluate_error_is_deferred_through_navigation_grace(self, monkeypatch, capsys):
+        log = []
+
+        class FakeLocator:
+            @property
+            def first(self):
+                return self
+
+            def press(self, *a, **k):
+                log.append("press")
+
+        class FakePage:
+            def __init__(self):
+                self.url = "https://auth.skt-id.co.kr/v2/login"
+
+            def locator(self, _selector):
+                return FakeLocator()
+
+            def evaluate(self, *a, **k):
+                log.append("js-evaluate")
+                raise RuntimeError("execution context destroyed during navigation")
+
+            def wait_for_timeout(self, timeout_ms):
+                if timeout_ms == 500:
+                    self.url = "https://m.tworld.co.kr/common/member/line"
+
+            def is_closed(self):
+                return False
+
+        monkeypatch.setattr(bc, "type_first_visible", lambda *a, **k: "ok")
+        monkeypatch.setattr(bc, "ensure_idpw_login_mode", lambda p: None)
+        monkeypatch.setattr(bc, "physical_tap_at", lambda *a, **k: log.append("physical-tap"))
+        monkeypatch.setattr(bc, "force_submit", lambda *a, **k: log.append("force-submit"))
+
+        bc.submit_tid_credentials(FakePage(), {"id": "me", "password": "x"}, "test")
+
+        output = capsys.readouterr().out
+        assert log == ["press", "js-evaluate"]
+        assert "debug dom submit completed during navigation grace" in output
+        assert "debug dom login click failed" not in output
+
     def test_dom_evaluate_navigation_error_stops_remaining_fallbacks(self, monkeypatch, capsys):
         log = []
 
