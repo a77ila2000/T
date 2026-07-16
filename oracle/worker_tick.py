@@ -25,7 +25,10 @@ from barcode_core import (
 # barcode_core.py unchanged - the scheduling decision logic must stay identical to what
 # Vercel's warm_tick has been running, per this project's repeated bad experience with
 # scheduling "cleverness".
-WORKER_SCRAPE_BUDGET_SECONDS = 100
+# Kept comfortably under WARM_LOCK_TTL/browser lock TTL (130s in barcode_core.py) with margin
+# for the systemd `timeout` backstop (110s, see tworld-worker.service) to still fire before
+# the lock itself would expire - see the WARM_LOCK_TTL comment in barcode_core.py.
+WORKER_SCRAPE_BUDGET_SECONDS = 90
 BROWSERLESS_WS_URL = os.environ.get("BROWSERLESS_WS_URL", "ws://localhost:3000")
 BROWSERLESS_TOKEN = os.environ.get("BROWSERLESS_TOKEN", "")
 HEARTBEAT_KEY = "barcode:worker-heartbeat"
@@ -167,20 +170,37 @@ def perform_scrape(target, force_scrape=False):
 
 def main():
     now = int(time.time())
+    # Peek for a due target BEFORE acquiring the warm lock - this runs every ~20s regardless
+    # of whether anything's actually due, and the vast majority of ticks find nothing to do
+    # (each target is only due once per ~20min cycle). Acquiring+releasing the warm lock on
+    # every idle tick costs 4 extra Redis commands on top of this MGET (SET NX + GET + DEL +
+    # DEL) for zero benefit, and at a 20s cadence that alone was on pace to blow past Upstash's
+    # free-tier monthly command quota. An idle tick now costs exactly this one MGET.
+    try:
+        target, state = select_warm_target(now)
+    except RedisUnavailable:
+        print("Redis unavailable - skipping this tick rather than guessing a target", flush=True)
+        return
+
+    if not target:
+        print(f"no_due now={now}", flush=True)
+        return
+
     lock_token = acquire_warm_lock()
     if not lock_token:
         print("warm lock busy - another tick (Vercel or this worker) is running, skipping", flush=True)
         return
 
+    # Re-check after acquiring the lock: the peek above ran lock-free, so another process
+    # (Vercel, or this same worker's own next tick under a race) could have already claimed
+    # and finished this exact target in the gap between the peek and actually getting the
+    # lock. Re-selecting guarantees we act on current state, not a stale read.
     try:
         target, state = select_warm_target(now)
     except RedisUnavailable:
-        print("Redis unavailable - skipping this tick rather than guessing a target", flush=True)
         release_warm_lock(lock_token)
         return
-
     if not target:
-        print(f"no_due now={now}", flush=True)
         release_warm_lock(lock_token)
         return
 

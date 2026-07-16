@@ -40,7 +40,14 @@ WARM_FAIL_INTERVAL = 30
 # global browser lock), so each real refresh lands at a different wall-clock moment, and
 # since next_refresh_at is always "this target's own last real success + its own real ttl",
 # that natural offset persists indefinitely rather than resyncing everyone to one shared clock.
-WARM_LOCK_TTL = 75
+# Both lock TTLs must comfortably exceed the slowest legitimate scrape on EITHER caller -
+# Vercel (hard-killed at 60s by the platform) and the Oracle worker (internal budget ~90s,
+# external `timeout` backstop 110s - see oracle/worker_tick.py). 75/90 only covered Vercel's
+# side; once the Oracle worker could legitimately still be mid-scrape past 75-90s, its lock
+# could silently expire and get re-acquired by another process (Vercel or another tick) while
+# the original attempt was still genuinely running - a real double-scrape race, not just a
+# slow-cleanup delay. Raised with margin above Oracle's 110s worst case.
+WARM_LOCK_TTL = 130
 WARM_CURRENT_TTL = 90
 # Confirmed empirically (2026-07-14): universe and general share ONE rotation clock per
 # account on the site's side - fetching either endpoint just reports how much time is left
@@ -151,8 +158,9 @@ def browser_lock_key():
 
 
 def acquire_browser_lock(account_id):
+    # See the WARM_LOCK_TTL comment above - same reasoning applies here.
     token = f"{account_id}:{time.time()}"
-    result = redis_command(["SET", browser_lock_key(), token, "EX", 90, "NX"])
+    result = redis_command(["SET", browser_lock_key(), token, "EX", 130, "NX"])
     if result == "OK":
         return token
     return None
@@ -256,7 +264,16 @@ def select_warm_target(now=None, lead_seconds=WARM_EARLY_LOGIN_LEAD_SECONDS):
             except Exception as exc:
                 print(f"warm state parse failed: {exc}", flush=True)
         due_at = int(state.get("next_refresh_at") or 0)
-        if due_at > now + lead_seconds:
+        # The early-lead window only makes sense against a real success schedule (the barcode
+        # is about to expire on its predictable ~20min cycle, worth trying a bit early) - it
+        # was never meant to apply on top of a FAILURE backoff, whose whole point is spacing
+        # out retries (compute_failure_retry_delay sets next_refresh_at to now+0 or now+30
+        # specifically to throttle how fast a failing target gets retried). Applying the same
+        # 20s lead there let a 30s backoff be selected again after only ~10s - observed live
+        # (2026-07-16) as a tworld_barcode_not_found target retrying every ~20s (this tick
+        # interval) instead of the intended 30s, once the login flow started failing.
+        effective_lead = 0 if int(state.get("consecutive_failures", 0)) > 0 else lead_seconds
+        if due_at > now + effective_lead:
             continue
         if selected is None or due_at < selected_due or (due_at == selected_due and index < selected.get("index", 0)):
             selected = dict(target, index=index)
@@ -296,6 +313,13 @@ def record_warm_result(target, token, success, http_code=""):
         state = dict(existing)
         state.setdefault("next_refresh_at", now + WARM_SUCCESS_INTERVAL)
         state["last_http_code"] = http_code
+        # Explicitly reset rather than leaving a stale value from a past failure streak sitting
+        # in `existing` (dict(existing) above copies it forward otherwise) - a lingering
+        # consecutive_failures both defeats compute_failure_retry_delay's "first failure after
+        # a success retries immediately" grace period on the NEXT failure, and would make
+        # select_warm_target's failure-vs-success early-lead check above misclassify this
+        # target as still failing.
+        state["consecutive_failures"] = 0
     else:
         delay, consecutive_failures = compute_failure_retry_delay(existing)
         state = {
@@ -493,6 +517,11 @@ def wait_for_tid_login_form(page, timeout_ms=8000):
 def force_submit(page):
     try: page.locator("input[type='password']").first.press("Enter", timeout=1200)
     except Exception as exc: print(f"debug password Enter failed: {exc}", flush=True)
+    # If that Enter press just succeeded and navigated us off the login page, the DOM click
+    # below would fire against whatever's on the NEW page instead - see the state-check
+    # comment in submit_tid_credentials() for the observed real failure this caused.
+    if "auth.skt-id.co.kr" not in safe_url(page):
+        return
     try:
         clicked = page.evaluate("""
         () => {
@@ -590,6 +619,16 @@ def submit_tid_credentials(page, target, label=""):
     except Exception as exc:
         print(prefix + f"debug password enter failed: {exc}", flush=True)
     page.wait_for_timeout(700)
+    # Everything below is a ladder of fallback submit attempts for when the Enter press above
+    # didn't register. Each one is only safe to fire while we're STILL stuck on the T-ID login
+    # page - once any earlier attempt actually succeeds and navigates us away, the remaining
+    # ones fire against whatever happens to be on the NEW page instead of the login form.
+    # Observed live (2026-07-16): the first DOM click below succeeded and moved to the tworld
+    # my-page, but the code still fired the next 3 fallback actions unconditionally - the last
+    # of which (force_submit's own loose "click the first big visible button" fallback) landed
+    # on a "실시간 이용요금" (real-time usage fee) link on the new page, navigating away to a
+    # bill-detail page instead and breaking the login that had actually already worked. This
+    # was the root cause of general-barcode refresh failing on every single attempt.
     if "auth.skt-id.co.kr" not in safe_url(page):
         return
     try:
@@ -613,14 +652,20 @@ def submit_tid_credentials(page, target, label=""):
     except Exception as exc:
         print(prefix + f"debug dom login click failed: {exc}", flush=True)
     page.wait_for_timeout(500)
+    if "auth.skt-id.co.kr" not in safe_url(page):
+        return
     try:
         page.locator("button:has-text('로그인'), button:has-text('Login'), input[type='submit'], button").last.click(force=True, timeout=2200)
         print(prefix + "debug locator force click submit", flush=True)
     except Exception as exc:
         print(prefix + f"login button locator failed: {exc}", flush=True)
     page.wait_for_timeout(200)
+    if "auth.skt-id.co.kr" not in safe_url(page):
+        return
     physical_tap_at(page, 206, 470)
     page.wait_for_timeout(200)
+    if "auth.skt-id.co.kr" not in safe_url(page):
+        return
     force_submit(page)
 
 
