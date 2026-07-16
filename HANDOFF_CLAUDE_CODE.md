@@ -4,9 +4,32 @@ Date: 2026-07-16 KST
 Repository: `https://github.com/a77ila2000/T`
 Production URL: `https://preedgaonprime.vercel.app`
 Oracle fallback URL: `https://168-138-194-2.sslip.io`
-Main branch latest commit at this handoff: `e52262e Fix the real root cause of 100% general-barcode failure: wrong T-World API endpoint`
+Production code baseline before this documentation-only closeout: `11f03a5 Merge pull request #8 from a77ila2000/agent/raster-barcode-force-dark`
 
 **Biggest change this session: both the login/scrape work and the read API now run on the Oracle VM, not Vercel.** Vercel serves only static HTML/CSS/JS. The browser calls `https://168-138-194-2.sslip.io` directly, so page views do not invoke Vercel Functions. See "Oracle Worker Migration" and "Oracle Read API" below before changing the hosting split.
+
+## Codex 운영 점검 종료 기록 (2026-07-16 19:59 KST)
+
+사용자가 실제 화면에서 정상 작동을 확인했으며, 요청에 따라 이 시점에서 자동 모니터링을 종료했다. 다음 추가 테스트 예정일은 **2026-07-20(월)**이다.
+
+### 최종 반영 상태
+
+- Oracle 상시 worker가 갱신을 전담하고 Vercel은 정적 프런트엔드만 제공한다. 화면 조회는 Oracle read API를 직접 사용하므로 Vercel Function CPU를 사용하지 않는다.
+- 같은 계정의 `universe`와 `general`은 하나의 Browserless 연결/컨텍스트를 공유하되 각 타입은 새 페이지에서 `universe -> general` 순서로 처리한다. 첫 타입의 인증 쿠키를 두 번째 타입이 재사용해 중복 로그인 비용을 줄였다.
+- 최종 전체 3계정 실운영 주기에서 6개 갱신이 모두 HTTP 200으로 성공했다. 같은 계정의 `universe -> general` 완료 간격은 각각 **6.3초, 6.7초, 6.9초**였고, 두 타입의 캐시 만료 시각 차이는 **0~1초**였다.
+- 6개 캐시는 모두 `has_cache=true`, `stale=false`였으며 로그인 실패, scrape timeout, `pair sibling missed`, worker 오류, API 재시작은 관찰되지 않았다.
+- 로그인 제출 도중 페이지 이동이 발생하는 경합은 URL 즉시 재확인과 기존 500ms navigation grace를 함께 사용한다. 성공한 이동 뒤 DOM/locator/좌표 fallback을 계속 실행해 새 페이지를 잘못 누르던 문제와 false-failure 로그를 방지한다.
+- 바코드는 SVG가 아니라 서버가 생성한 **429 x 196 흑백 PNG** 한 장으로 제공한다. 삼성 인터넷의 강제 다크 모드가 SVG 배경/막대/숫자를 서로 다르게 변환하던 문제를 피하고, `.barcode-container`의 `brightness(2.4) contrast(3)` 보정으로 강제 변환 뒤에도 흰 배경과 검은 막대 대비를 복원한다. 프런트엔드는 `style.css?v=20260716-dark-barcode-4`를 사용한다.
+- 생성 완료 문구에는 바코드 번호를 반복 표시하지 않는다. 사용자가 삼성 인터넷 실제 화면에서 수정 결과가 정상이라고 확인했다.
+- 일반/우주 번호는 발급 API 응답을 **그대로** 저장·표시한다. 같은 계정의 실측값은 앞 12자리와 마지막 회전 2자리가 같고 중간 채널 자리가 달랐다(`universe=61`, 일반 웹=`22`, 두 값의 차이 3900). 모바일 앱/웹에서 보이는 `20/22`, `60/61` 차이를 임의로 치환하거나 정규화하지 않는다.
+- 로컬 전체 회귀 테스트는 **40 passed**였고 Python compile 검사도 통과했다. 배포 당시 `tworld-worker.timer`, `tworld-api`, Caddy가 모두 active였으며 `tworld-api` 재시작 횟수는 0이었다. Oracle 자원은 약 11.9GB RAM 중 0.8GB 사용, 45GB 디스크 중 7.0GB 사용(16%)으로 여유가 있었다.
+
+### 모니터링 종료 범위와 다음 테스트
+
+- 최종 배포 `11f03a5`의 2시간 검증 기준은 2026-07-16 19:51~21:51 KST였으나, 사용자가 정상 작동을 직접 확인하고 종료를 요청해 **19:59 KST에 조기 종료**했다. 따라서 “최종 코드 기준 연속 2시간 무오류”까지 검증됐다고 간주하면 안 된다.
+- 종료 전 확인한 최종 코드의 자연 갱신은 전체 3계정 1주기다. 다음 월요일에는 최소 2시간 동안 여러 20분 회전을 관찰해 동일한 6초대 pair 간격, 0~1초 만료 skew, stale 노출 부재, 로그인 경합 부재가 반복되는지 확인한다.
+- 다음 테스트 때 확인할 로그 키워드: `paired refresh selected`, `batch target complete`, `stage=poll_for_rotation`, `dom submit completed during navigation grace`, `success=False`, `Scrape timed out`, `pair sibling missed`, `Traceback`.
+- 2026-07-16 19:59 KST에 Codex의 10분 간격 모니터링 자동 작업을 삭제했다. 다음 테스트는 새 모니터링 작업을 만든 뒤 시작한다.
 
 ## Goal
 
