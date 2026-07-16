@@ -30,7 +30,13 @@ WARM_TARGETS = [
     {"id": "min560728", "type": "general", "name": "father-general"},
 ]
 WARM_SUCCESS_INTERVAL = 20 * 60
-WARM_FAIL_INTERVAL = 30
+# Bounded exponential backoff for consecutive failures: retry immediately on the first
+# failure (so a single transient hiccup doesn't lose this target's place in the schedule),
+# then back off progressively (30s/60s/120s/300s) instead of hammering a genuinely broken
+# site/login every 30s indefinitely during a sustained outage. Capped at 300s rather than
+# growing unbounded - still checks in every 5 minutes even in the worst case, not "less and
+# less often forever".
+FAILURE_BACKOFF_SCHEDULE = [0, 30, 60, 120, 300]
 # The site itself won't renew a barcode's ~20min validity early - refreshing before the real
 # expiry just gets the same barcode back, so next_refresh_at MUST be based on the real
 # remaining seconds_left from the API response, never an artificially-pulled-earlier slot
@@ -157,10 +163,17 @@ def browser_lock_key():
     return "barcode:browserless-lock"
 
 
-def acquire_browser_lock(account_id):
-    # See the WARM_LOCK_TTL comment above - same reasoning applies here.
+# Default TTLs sized for the Oracle worker's worst case (see the WARM_LOCK_TTL comment
+# above). Vercel passes its own shorter, platform-appropriate TTL explicitly at its call
+# sites (get_barcode.py) - if Vercel used this 130s default too, a force-killed Vercel
+# request (60s hard kill) would take up to 130s to self-heal instead of the ~90s that
+# actually matches its own worst case, needlessly blocking other targets longer.
+BROWSER_LOCK_TTL_DEFAULT = 130
+
+
+def acquire_browser_lock(account_id, ttl=BROWSER_LOCK_TTL_DEFAULT):
     token = f"{account_id}:{time.time()}"
-    result = redis_command(["SET", browser_lock_key(), token, "EX", 130, "NX"])
+    result = redis_command(["SET", browser_lock_key(), token, "EX", ttl, "NX"])
     if result == "OK":
         return token
     return None
@@ -178,13 +191,12 @@ def release_browser_lock(token):
 
 
 def compute_failure_retry_delay(existing):
-    # First failure after a success (or a fresh target) retries immediately so it doesn't
-    # lose its place behind targets on the normal ~20 minute cycle. A second consecutive
-    # failure backs off by WARM_FAIL_INTERVAL (30s) instead of retrying instantly again,
-    # so any other already-due target gets a turn first; if nothing else is due, this
-    # target simply comes back around after the 30s cool-down.
+    # See FAILURE_BACKOFF_SCHEDULE above. consecutive_failures resets to 0 on the next real
+    # success (record_warm_result's success path), so this only escalates during a genuine
+    # sustained failure streak, not across normal day-to-day operation.
     consecutive_failures = int(existing.get("consecutive_failures", 0)) + 1
-    delay = 0 if consecutive_failures == 1 else WARM_FAIL_INTERVAL
+    index = min(consecutive_failures - 1, len(FAILURE_BACKOFF_SCHEDULE) - 1)
+    delay = FAILURE_BACKOFF_SCHEDULE[index]
     return delay, consecutive_failures
 
 
@@ -282,9 +294,9 @@ def select_warm_target(now=None, lead_seconds=WARM_EARLY_LOGIN_LEAD_SECONDS):
     return selected, selected_state or {}
 
 
-def acquire_warm_lock():
+def acquire_warm_lock(ttl=WARM_LOCK_TTL):
     token = f"warm:{time.time()}"
-    result = redis_command(["SET", warm_lock_key(), token, "EX", WARM_LOCK_TTL, "NX"])
+    result = redis_command(["SET", warm_lock_key(), token, "EX", ttl, "NX"])
     if result == "OK":
         return token
     return None
@@ -423,13 +435,34 @@ def fetch_barcode_data(page):
 
 
 def fetch_tworld_membership_data(page):
+    # `/common/my/tmembership` (no `/api/v6` prefix) always 404s - it's not a real endpoint.
+    # T-World's own frontend calls `/api/v6/common/my/tmembership`, which additionally requires
+    # session headers built from the `TWM`/`SessionUpdatedAt` cookies (without them it responds
+    # 401 "Some headers are missing"). Verified live 2026-07-16: the old URL 404s every time,
+    # the new URL without headers 401s, and the new URL with these headers returns a real
+    # membership payload including otbNum/expireSeconds - this was the actual root cause of
+    # every general-barcode refresh failing via this API path (the DOM-visible-extraction
+    # fallback further down was masking it on the rare attempt that still found a number).
     try:
         result = page.evaluate("""
         async () => {
-          const response = await fetch('/common/my/tmembership', {
+          function getCookie(name) {
+            const match = document.cookie.match(new RegExp('(^| )' + name + '=([^;]+)'));
+            return match ? decodeURIComponent(match[2]) : '';
+          }
+          const twm = getCookie('TWM') || '';
+          const updated = getCookie('SessionUpdatedAt') || '';
+          const response = await fetch('/api/v6/common/my/tmembership', {
             method: 'GET',
             credentials: 'include',
-            headers: {'Content-Type': 'application/json'}
+            headers: {
+              'Content-Type': 'application/json',
+              'Authorization': twm,
+              'SessionUpdatedAt': updated,
+              'x-session-key': twm,
+              'x-session-updated': updated,
+              'x-referrer': location.href,
+            }
           });
           const text = await response.text();
           try {

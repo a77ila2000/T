@@ -186,7 +186,10 @@ def main():
         print(f"no_due now={now}", flush=True)
         return
 
-    lock_token = acquire_warm_lock()
+    # Explicit 130s TTL (barcode_core's default, but spelled out here since Vercel's own call
+    # site in get_barcode.py deliberately uses a shorter 75s - see that file's comment) so this
+    # lock can't expire while this worker's own up-to-110s run is still legitimately in flight.
+    lock_token = acquire_warm_lock(ttl=130)
     if not lock_token:
         print("warm lock busy - another tick (Vercel or this worker) is running, skipping", flush=True)
         return
@@ -211,9 +214,9 @@ def main():
         "id": target["id"],
         "type": target["type"],
         "name": target["name"],
-    }), "EX", 90])
+    }), "EX", 130])  # matches this worker's own lock TTL, not Vercel's shorter WARM_CURRENT_TTL
 
-    browser_lock_token = acquire_browser_lock(target["id"])
+    browser_lock_token = acquire_browser_lock(target["id"], ttl=130)
     if not browser_lock_token:
         print(f"browser lock busy - skipping {target['name']} this tick", flush=True)
         release_warm_lock(lock_token)

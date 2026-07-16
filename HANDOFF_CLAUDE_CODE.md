@@ -101,6 +101,87 @@ For a while this session, universe-type logins used a discovered shortcut: click
 4. **Verified live 2026-07-16**: manual single-cycle run succeeded end-to-end (real T-ID login, real barcode fetched, Redis updated, ~2.7s CPU consumed per `systemd`'s own accounting). After enabling the timer, it automatically caught and successfully refreshed multiple real targets with zero manual triggering (including one case of 3 consecutive `tworld_barcode_not_found` failures on `mother-general` self-healing via the pre-existing immediate-retry logic, then succeeding - normal transient-failure handling, not a new bug). Confirmed via `warm_status` that results written by the Oracle worker are immediately visible through Vercel's existing read path with zero frontend changes needed.
 5. **Current state / what's NOT done yet**: cron-job.org (every 1 min) and Vercel's own `warm_tick` are **deliberately left running unchanged** as a parallel safety net - the existing global Redis locks (`warm_lock`/`browser_lock`) already make dual-writer operation safe (whichever fires first wins, no code change needed), confirmed live via repeated "warm lock busy - another tick (Vercel or this worker) is running, skipping" log lines showing both systems actively contending. **Remaining steps** (not yet done, needs a few days of parallel observation first): confirm via the Vercel usage dashboard that CPU hours actually dropped, then reduce cron-job.org's frequency (e.g. 1min -> 15min, kept as a reduced-but-present backstop) - do **not** strip any code from `get_barcode.py`/`vercel.json`, the savings come from invoking `warm_tick` less often, not from deleting the fallback path.
 
+## Oracle Worker Bugfixes (2026-07-16, found live after the migration)
+
+Within hours of the Oracle worker going live, the user reported a card visibly stuck on
+"만료됨 (5:05 경과)" - general-barcode refresh had been failing on **every single attempt**
+(46 failures, 0 successes via the API path, per a live journal review). Root-caused and fixed
+via an external review + live verification against the actual running system (commit `e2431e0`
+and a follow-up commit for the endpoint fix - see the commit timeline):
+
+1. **The real root cause: wrong T-World membership API endpoint.** `fetch_tworld_membership_data()`
+   called `/common/my/tmembership`, which **always 404s** - it isn't a real endpoint. T-World's
+   own frontend calls `/api/v6/common/my/tmembership`, which additionally requires session
+   headers (`Authorization`/`x-session-key` from the `TWM` cookie, `SessionUpdatedAt`/
+   `x-session-updated` from the `SessionUpdatedAt` cookie, `x-referrer`) - without them it
+   responds 401 "Some headers are missing". **Verified live 2026-07-16** by running all three
+   variants inside a real authenticated session: old URL -> 404, new URL without headers ->
+   401, new URL with the session headers -> 200 with a real `otbNum`/`expireSeconds` payload.
+   This explains why general-barcode refresh had been failing 100% of the time via the API path
+   since the Oracle worker went live - the one earlier "success" seen in testing came from the
+   DOM-visible-extraction fallback, not the API, which masked how broken the API call was.
+2. **Login fallback ladder fired blindly regardless of whether an earlier step already
+   succeeded.** `submit_tid_credentials()`/`force_submit()` fire a sequence of fallback submit
+   actions (DOM click, locator click, coordinate tap, force_submit's own click) with no check
+   for "did we already navigate away". Confirmed live: the first DOM click succeeded and moved
+   to the tworld my-page, but the code kept firing - force_submit's own loose "click the first
+   big visible button" fallback landed on an unrelated "실시간 이용요금" link on the new page,
+   breaking the already-successful login. Fixed by checking `"auth.skt-id.co.kr" not in
+   safe_url(page)` before each subsequent fallback step, in both functions.
+3. **Failure backoff was defeated by the early-lead window.** `select_warm_target()`'s 20s
+   early-lead (meant for real ~20min success schedules) was also applied on top of failure
+   backoff delays - a 30s backoff plus a 20s lead meant a failing target was retried after only
+   ~10s, not 30s. Confirmed live as ~20s-interval retry loops once bug #2 started failing
+   repeatedly. Early-lead now only applies when `consecutive_failures` is 0.
+4. **Failure backoff is now bounded-exponential, not flat.** `FAILURE_BACKOFF_SCHEDULE = [0, 30,
+   60, 120, 300]` (was: 0 then flat 30s forever) - still checks in every 5 minutes at worst
+   during a sustained outage, instead of hammering a broken login every 30s indefinitely.
+   `record_warm_result()`'s success path now explicitly resets `consecutive_failures` to 0
+   (previously only implicitly cleared via `set_cached_barcode`'s own write, which doesn't
+   always run before a recorded success - e.g. a cache-hit-without-rescrape success path).
+5. **Oracle's idle-tick Redis usage cut from 5 commands to 1.** `oracle/worker_tick.py`'s
+   `main()` used to acquire+release the global warm lock on every ~20s tick even when nothing
+   was due, projected to exceed Upstash's free-tier monthly command quota at that polling
+   frequency. Reordered to peek via `select_warm_target()` (1 MGET) *before* touching the lock;
+   only acquires it (and re-verifies due-ness, guarding against the lock-free peek going stale)
+   once something is actually due. The same peek-before-lock reorder was mirrored into Vercel's
+   `warm_tick()` too, since cron-job.org's 1-minute polling has the identical (smaller-scale)
+   waste.
+6. **Lock TTLs now differ per caller.** `WARM_LOCK_TTL`/browser-lock TTL had been raised to a
+   shared 130s to stop the Oracle worker's up-to-110s runs from outliving their own lock (a real
+   double-scrape race risk) - but reusing that same 130s for Vercel meant a force-killed Vercel
+   request (60s hard kill) would now take up to 130s to self-heal instead of its old, more
+   appropriate ~75-90s. `acquire_warm_lock()`/`acquire_browser_lock()` now take an explicit `ttl`
+   parameter: Vercel's call sites in `get_barcode.py` pass 75/90, Oracle's in
+   `oracle/worker_tick.py` pass 130 (matching its own `WORKER_SCRAPE_BUDGET_SECONDS=90` +
+   `timeout 110` systemd wrapper, with margin).
+7. **Added `tests/` with real pytest tests** (`test_barcode_core.py`, `test_worker_tick.py`, 15
+   tests, all mocked - no network/Redis/browser needed) covering every fix above by name, plus
+   the earlier session's fixes (parse_seconds_left, RedisUnavailable, MGET dedup). Previously
+   all verification this session was ad-hoc (typed inline during the session, not saved) - a
+   fair gap the external review pointed out. Run with `pip install pytest && pytest tests/ -v`.
+8. **Added `.github/workflows/test.yml`** - runs the pytest suite on every push/PR (not a
+   scheduled cron, unlike the unreliable one removed earlier this project's history - see
+   "Runtime / Hosting"). Cheap (a few seconds), catches an obvious regression before it reaches
+   either Vercel or the Oracle server.
+
+**Deliberately NOT applied this pass** (real points, lower urgency/higher risk, revisit only if
+actually causing an observed problem):
+- Atomic Redis "compare-and-delete" (Lua `EVAL`) for lock release, replacing the current
+  GET-then-DEL (non-atomic - a TTL-expiry-timing coincidence could let a release delete a
+  *different* process's newly-acquired lock). Real but low-probability now that TTLs have
+  generous margin; adds real complexity (Upstash REST `EVAL`) to the most fragile subsystem.
+- Replacing `submit_tid_credentials()`'s fixed 500-700ms waits with active polling for the
+  login form's disappearance. The state-check fix above (item 2) already closed the *observed*
+  failure; this would only shrink an already-small residual timing window further.
+- Unifying Oracle's `perform_scrape()` and Vercel's `perform_barcode_request()` into one shared
+  function - both still independently orchestrate the same `barcode_core` calls in the same
+  order. Valid long-term cleanup, but a large structural change; the urgent fixes above should
+  land and stabilize first.
+- Full docs reorg (splitting this file into README/operations/history docs). Fixed the factual
+  staleness this pass instead (date/commit/TTL values/polling-interval claims below) rather than
+  restructuring.
+
 ## Session Fixes (2026-07-16, before the Oracle migration)
 
 1. **Per-card timer/status freezing during active refresh** (commit `27cc7ac`): the card's own "만료됨 (M:SS 경과)" timer and status text were gated on `img.dataset.stale`, a DOM flag only set once an actual `fetchBarcode` response came back - with no tab-refocus event to force one, that meant the card froze at whatever text it had at the moment of local expiry for the entire refresh duration, while the status panel above (driven by the same `warm_status` poll) correctly ticked through "갱신 중 (M:SS 경과)" live. Fixed by deriving "is this due" from the live poll data (`isActive`/`dueTargets`/`remaining`) instead of the lagging DOM flag, in both `refreshWarmStatus()`'s per-card block and `updateVisibleCardTimers()`.
@@ -178,7 +259,7 @@ On page load:
 - Creates three account cards, defaults each to `universe`.
 - Fetches visible universe cache with `cache_only=1` (`refreshVisibleCaches()`, called once).
 - Starts `runWarmWorker()`.
-- Polls warm status every 5s, re-renders the live countdown every 1s from the last polled snapshot.
+- Polls warm status on an **adaptive** schedule (not a flat 5s anymore, since 2026-07-16 - see "Session Fixes" below): 3s while active/queued, 5s when something's due within 60s, 25s otherwise, paused while the tab is hidden. Re-renders the live countdown every 1s from the last polled snapshot regardless.
 - `visibilitychange`/`pageshow`/`focus` listeners re-run the cache/status/warm-worker checks when the tab becomes visible again, **debounced 350ms** (these three events can fire within milliseconds of each other for the same real "tab reactivated" moment - added this session after the redundant-request review below).
 - `refreshWarmStatus()` tracks each target's `last_success_at` and immediately re-fetches the visible barcode image the moment it moves forward - this is now the **only** recurring re-fetch of the image (a prior session added this to close a lag bug; this session removed the then-redundant 30s `refreshVisibleCaches()` poll it made obsolete). Covers refreshes from this tab's own `runWarmWorker()` and ones triggered externally by cron-job.org equally.
 
@@ -205,14 +286,16 @@ Per-card status:
 
 ## Warm Scheduling
 
-Targets (`WARM_TARGETS` in `api/get_barcode.py`) are the 6 account×type combinations. Key constants:
+Targets (`WARM_TARGETS`, now in `api/barcode_core.py` - see "Oracle Worker Migration") are the 6
+account×type combinations. Key constants (updated 2026-07-16, see "Oracle Worker Bugfixes"):
 
 ```py
-WARM_SUCCESS_INTERVAL = 20 * 60      # real barcode validity
-WARM_FAIL_INTERVAL = 30              # 2nd+ consecutive failure backoff
-WARM_LOCK_TTL = 75                   # self-heal window if Vercel hard-kills a request
-WARM_CURRENT_TTL = 90
-WARM_EARLY_LOGIN_LEAD_SECONDS = 20   # see "Early-Login-Lead" below
+WARM_SUCCESS_INTERVAL = 20 * 60                    # real barcode validity
+FAILURE_BACKOFF_SCHEDULE = [0, 30, 60, 120, 300]   # bounded exponential, indexed by consecutive_failures-1
+WARM_LOCK_TTL = 130                                # Oracle-oriented default; Vercel passes ttl=75 explicitly at its call sites
+BROWSER_LOCK_TTL_DEFAULT = 130                      # same story; Vercel passes ttl=90 explicitly
+WARM_CURRENT_TTL = 90                               # Vercel's own "in progress" marker TTL; Oracle uses 130 inline in worker_tick.py
+WARM_EARLY_LOGIN_LEAD_SECONDS = 20   # see "Early-Login-Lead" below - only applies when consecutive_failures==0
 ```
 
 **Hard constraint (do not violate)**: the site will not renew a barcode's ~20-minute validity early - requesting before real expiry just returns the still-current barcode. `next_refresh_at` must always be computed from the real `seconds_left` the site actually reports, never pulled artificially earlier "for staggering purposes." **A fixed epoch-aligned stagger was tried and fully reverted this session** (commits `fe91ea3` then `79f1dcf`) after this was clarified - it scheduled attempts ~2 minutes before real expiry, which is pure wasted work since the site just returns the same code. Any future temptation to "spread out the 6 targets on a shared clock" should be resisted for this reason.
@@ -248,7 +331,7 @@ Also batched in the same pass: `select_warm_target()` and `warm_status()` used t
 
 ## Known Current Issues / Watch Points
 
-1. Vercel serverless: if a request gets hard-killed past its `maxDuration`, the `finally` block (lock release) never runs - self-heals via each lock's own TTL (`WARM_LOCK_TTL=75`, browser lock `90s`). This is a known, accepted tradeoff, not a bug.
+1. Vercel serverless: if a request gets hard-killed past its `maxDuration`, the `finally` block (lock release) never runs - self-heals via each lock's own TTL (Vercel passes `ttl=75`/`ttl=90` explicitly at its call sites; Oracle's worker uses the longer 130s default - see "Oracle Worker Bugfixes"). This is a known, accepted tradeoff, not a bug.
 2. A single transient warm-tick failure was observed and confirmed self-healing via the existing immediate-retry-on-first-failure logic (`compute_failure_retry_delay`) during this session's monitoring pass - working as designed.
 3. Browserless connection/timeouts can still surface as 502/504/423 (423 = another refresh already running; 502 = login/extraction failed; 504 = timed out) - expected occasional failure modes, handled by the retry/backoff logic.
 4. Deferred (reviewed, agreed on scope, not yet implemented as of 2026-07-16 - see project memory `project_goto_page_hard_failure`): `goto_page()` in `barcode_core.py` currently swallows every navigation exception uniformly (timeouts, benign `net::ERR_ABORTED` redirect races, and genuine unrecoverable network failures all get the same "log and return None" treatment) - the only safety net is `mark()`'s overall elapsed-time budget, not per-navigation failure detection. Agreed direction: add an opt-in `required=True` param, classify hard failures via an **allowlist** (not denylist) of specific net error substrings (`ERR_NAME_NOT_RESOLVED`, `ERR_CONNECTION_REFUSED`, `ERR_CONNECTION_RESET`, `ERR_CONNECTION_CLOSED`, `ERR_CONNECTION_TIMED_OUT`, `ERR_INTERNET_DISCONNECTED`, `ERR_ADDRESS_UNREACHABLE`, `ERR_EMPTY_RESPONSE` - deliberately excluding `ERR_ABORTED`/`TimeoutError`, which are common and often benign in this OAuth redirect chain), and raise (not swallow) only for the two safest call sites: the very first `goto_page()` call right after a fresh CDP connect in each login path (`open_tid_from_my()`'s first hop to `MY_PAGE_URL`, and the `TWORLD_LOGIN_URL` goto in the general/tworld path) - a hard failure there strongly signals a systemic Browserless/network issue, not something a middle-hop retry would fix. Middle hops were deliberately excluded from scope since each is an independent top-level navigation that doesn't strictly depend on the prior hop succeeding.
@@ -335,16 +418,35 @@ Run before commit:
 ```powershell
 python -m py_compile api\get_barcode.py api\barcode_core.py api\warm_status.py api\warm_tick.py oracle\worker_tick.py
 node -e "const fs=require('fs');const html=fs.readFileSync('public/index.html','utf8');const m=html.match(/<script>([\s\S]*)<\/script>/); new Function(m[1]); console.log('JS_OK')"
+pip install pytest ; pytest tests\ -v
 if (Test-Path api\__pycache__) { Remove-Item -Recurse -Force api\__pycache__ }
 git diff --check
 ```
 
+(`tests/` added 2026-07-16 - see "Oracle Worker Bugfixes". Also runs automatically on push via `.github/workflows/test.yml`.)
+
 ## Last Observed Production State
 
-**2026-07-16**, right after the Oracle worker went live:
+**2026-07-16, later the same day** - after the "Oracle Worker Bugfixes" pass (see that section):
+the earlier same-day entry below claiming the `mother-general` 3x-failure-then-success was
+"existing retry logic working as designed, not a new bug" turned out to be **incomplete** - a
+live journal review shortly after showed general-barcode refresh had actually been failing
+**100% of the time via the API path** (46 failures, 0 API successes) due to the wrong-endpoint
+bug described in "Oracle Worker Bugfixes" #1; the one success seen earlier came from the
+DOM-visible-extraction fallback, which happened to mask how broken the API call was. After
+deploying the endpoint fix + the login-fallback state-check fix:
+- Live-tested the corrected endpoint directly (see "Oracle Worker Bugfixes" #1) - real 200
+  response with a real `otbNum`/`expireSeconds` payload.
+- Watched several real ticks post-fix: no more misdirected clicks (no "실시간 이용요금" or
+  similar wrong-page navigations), general-barcode successes recorded via the real API path.
+- All six slots showed `stale: false` with recent `last_success_at` timestamps after the fix.
+- 15 new pytest tests added (`tests/`) covering every fix in this pass by name, all passing.
+
+**2026-07-16, right after the Oracle worker first went live** (see the caveat above - the
+general-barcode assessment in this entry was later found to be incomplete):
 
 - All six slots healthy; `barcode_core.py` split verified via regression tests, then live-verified via a real successful scrape immediately after the sys.path hotfix deployed.
-- Oracle worker (`tworld-worker.timer`, every 20s) confirmed automatically catching and successfully refreshing multiple real targets with zero manual triggering, including one self-healing transient-failure case (`mother-general`, 3x `tworld_barcode_not_found` then success - existing retry logic working as designed, not a new bug).
+- Oracle worker (`tworld-worker.timer`, every 20s) confirmed automatically catching and successfully refreshing multiple real targets with zero manual triggering, including one self-healing transient-failure case (`mother-general`, 3x `tworld_barcode_not_found` then success - later found to actually be the wrong-endpoint bug, not ordinary transient-failure handling; see the entry above).
 - Confirmed via `systemd`'s own accounting: ~2-3s CPU per successful scrape on the Oracle side.
 - Confirmed via `warm_status` that Vercel's read path sees Oracle-worker-written results immediately, with zero frontend changes.
 - Confirmed via repeated "warm lock busy" log lines on both sides that Vercel's `warm_tick` (still driven by cron-job.org every 1 min) and the Oracle worker coexist safely on the shared Redis locks, as designed.

@@ -246,9 +246,10 @@ def warm_tick():
     # retry storm. That bug fix alone brought the same-person pair gap down to a consistent
     # ~40-60s with no failures - back to the simple single-target-per-request version.
     now = int(time.time())
-    lock_token = acquire_warm_lock()
-    if not lock_token:
-        return json_response({"status": "locked", "retry_after": 60})
+    # Peek for a due target BEFORE acquiring the warm lock - cron-job.org hits this every
+    # minute regardless of whether anything's actually due, and acquiring+releasing the lock
+    # on every such idle call cost 4 Redis commands for zero benefit (same reasoning as the
+    # Oracle worker's identical peek-before-lock change - see oracle/worker_tick.py).
     try:
         target, state = select_warm_target(now)
     except RedisUnavailable:
@@ -256,6 +257,23 @@ def warm_tick():
         # (select_warm_target failing open) would launch a real login scrape for whichever
         # target happens to sort first, purely because Redis hiccuped. Skip this tick; the
         # next cron-job.org call (or client retrigger) picks up normally once Redis recovers.
+        return json_response({"status": "redis_unavailable"}, status=503)
+    if not target:
+        return json_response({"status": "no_due", "now": now})
+
+    # Explicit, shorter TTL than barcode_core's Oracle-oriented default (130s) - Vercel gets
+    # hard-killed at 60s by the platform, so a lock that outlives a killed request by 15s of
+    # margin (75s) self-heals faster than reusing Oracle's much longer worst-case TTL would.
+    lock_token = acquire_warm_lock(ttl=75)
+    if not lock_token:
+        return json_response({"status": "locked", "retry_after": 60})
+
+    # Re-verify after acquiring the lock: the peek above ran lock-free, so the Oracle worker
+    # (which checks every ~20s, far more often than this once-a-minute cron call) could have
+    # already claimed and finished this exact target in the gap.
+    try:
+        target, state = select_warm_target(now)
+    except RedisUnavailable:
         release_warm_lock(lock_token)
         return json_response({"status": "redis_unavailable"}, status=503)
     if not target:
@@ -433,7 +451,7 @@ def perform_barcode_request(account_id, barcode_type, debug_mode=False, cache_on
         target = next((acc for acc in accounts if acc["id"] == account_id), None)
         if not target:
             return f"Account not found: {account_id}", 404
-        lock_token = acquire_browser_lock(account_id)
+        lock_token = acquire_browser_lock(account_id, ttl=90)  # see the acquire_warm_lock ttl comment above
         if UPSTASH_REDIS_REST_URL and UPSTASH_REDIS_REST_TOKEN and not lock_token:
             cached = get_cached_barcode(account_id, barcode_type, allow_stale=True)
             if not debug_mode and cached:
