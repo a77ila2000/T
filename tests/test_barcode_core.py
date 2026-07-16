@@ -80,6 +80,23 @@ class TestSelectWarmTargetEarlyLead:
         target, _ = bc.select_warm_target(now)
         assert target is not None and target["name"] == "me-universe"
 
+    def test_lead_includes_timer_observed_rotation_shift_and_login_margin(self, _isolate_redis):
+        # Rotation moved up to ~47s earlier than the preceding API TTL predicted. Together
+        # with the 20s timer, a 90s window leaves a real login margin without more ticks.
+        now = int(time.time())
+        for t in bc.WARM_TARGETS:
+            _isolate_redis[bc.warm_state_key(t["id"], t["type"])] = json.dumps(
+                {"next_refresh_at": now + 5000}
+            )
+        _isolate_redis[bc.warm_state_key("a77ila2000", "universe")] = json.dumps(
+            {"next_refresh_at": now + 85}
+        )
+
+        target, _ = bc.select_warm_target(now)
+
+        assert bc.WARM_EARLY_LOGIN_LEAD_SECONDS == 90
+        assert target is not None and target["name"] == "me-universe"
+
     def test_failure_backoff_does_not_get_early_lead(self, _isolate_redis):
         # 2026-07-16 bug: the 20s early-lead window was also applied on top of failure
         # backoff delays, letting a 30s backoff be selected again after only ~10s.
@@ -102,6 +119,21 @@ class TestRecordWarmResult:
         )
         state = bc.record_warm_result(target, "tok", success=True, http_code="200")
         assert state.get("consecutive_failures") == 0
+
+    def test_batch_caller_can_defer_warm_lock_release(self, _isolate_redis, monkeypatch):
+        target = {"id": "a77ila2000", "type": "universe", "name": "me-universe"}
+        releases = []
+        monkeypatch.setattr(bc, "release_warm_lock", lambda token: releases.append(token))
+
+        bc.record_warm_result(
+            target,
+            "pair-token",
+            success=True,
+            http_code="200",
+            release_lock=False,
+        )
+
+        assert releases == []
 
     def test_failure_backoff_schedule_is_bounded(self, _isolate_redis):
         target = {"id": "a77ila2000", "type": "universe", "name": "me-universe"}
@@ -192,6 +224,64 @@ class TestSubmitTidCredentialsStopsOnceNavigatedAway:
 
         assert log.count("js-evaluate") == 1
         assert not any(entry == "click" for entry in log)
+
+
+class TestWaitForTidResult:
+    class FakePage:
+        def __init__(self, url):
+            self.url = url
+            self.waits = []
+
+        def is_closed(self):
+            return False
+
+        def wait_for_timeout(self, timeout_ms):
+            self.waits.append(timeout_ms)
+
+    def test_universe_home_is_a_completed_callback(self):
+        # The real T ID flow sometimes strips the callback path and lands on `/` after a
+        # successful login.  Waiting for `/my` in that case cost every refresh 10 seconds.
+        page = self.FakePage("https://m.sktuniverse.co.kr/")
+
+        assert bc.wait_for_tid_result(page, 50) == "callback"
+        assert page.waits == [800]
+
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "https://m.sktuniverse.co.kr/member/login/view?loginRedirectUrl=%2Fmy",
+            "https://m.sktuniverse.co.kr/netfunnel?path=%2Fmember%2Flogin%2Fview",
+        ],
+    )
+    def test_login_and_netfunnel_pages_are_not_false_successes(self, monkeypatch, url):
+        page = self.FakePage(url)
+        monkeypatch.setattr(bc, "get_body_text", lambda *a, **k: "login")
+
+        assert bc.wait_for_tid_result(page, 1) == "timeout"
+        assert page.waits == []
+
+
+class TestWaitForTworldResult:
+    class FakePage:
+        url = "https://m.tworld.co.kr/v6/my"
+
+        def __init__(self):
+            self.waits = []
+
+        def wait_for_timeout(self, timeout_ms):
+            self.waits.append(timeout_ms)
+
+    def test_worker_can_delegate_settle_to_my_ready_check(self):
+        page = self.FakePage()
+
+        assert bc.wait_for_tworld_result(page, 50, settle_ms=0) == "callback"
+        assert page.waits == []
+
+    def test_default_settle_is_preserved_for_other_callers(self):
+        page = self.FakePage()
+
+        assert bc.wait_for_tworld_result(page, 50) == "callback"
+        assert page.waits == [800]
 
 
 class TestFetchTworldMembershipData:

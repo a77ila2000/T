@@ -128,7 +128,13 @@ header h1 {
     display: flex;
     align-items: center;
     justify-content: center;
-    background-color: #f8f9fa;
+    /* Barcode contrast is functional, not decorative. Samsung Internet/Chromium force-dark
+       may otherwise remap the SVG's white and black pixels to gray. `only light` opts this
+       subtree out of automatic darkening while the rest of the page may remain dark. */
+    color-scheme: only light;
+    forced-color-adjust: none;
+    background-color: #ffffff !important;
+    color: #000000 !important;
     border-radius: 8px;
     border: 1px dashed var(--border-color);
     position: relative;
@@ -137,6 +143,13 @@ header h1 {
 .barcode-container img {
     max-width: 100%;
     height: auto;
+    color-scheme: only light;
+    forced-color-adjust: none;
+    background-color: #ffffff !important;
+    filter: none !important;
+    -webkit-filter: none !important;
+    mix-blend-mode: normal;
+    opacity: 1;
 }
 
 .barcode-container img:not(.hidden) {

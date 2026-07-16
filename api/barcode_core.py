@@ -60,13 +60,20 @@ WARM_CURRENT_TTL = 90
 # on the account's current cycle, not "20 fresh minutes from whenever we happened to ask".
 # So a plain on-time scrape always spends its ~20-35s login/navigation AFTER the real expiry
 # has already passed, meaning the barcode is genuinely stale for that whole login duration.
-# To shrink that window, a scraper may pick a target up to this many seconds BEFORE its real
-# next_refresh_at (see select_warm_target) - the login/navigation happens early while the old
-# barcode is still technically valid, and once on the my-page, if the value read back still
-# looks like the tail end of the old cycle, poll_for_fresh_barcode() waits it out in place (no
-# re-login needed) until the real rotation happens. This does NOT increase scrape frequency -
-# it's still one attempt per ~20min cycle, just started slightly earlier.
-WARM_EARLY_LOGIN_LEAD_SECONDS = 20
+# To shrink that window, a scraper may pick a target before its real next_refresh_at (see
+# select_warm_target) - the login/navigation happens early while the old barcode is still
+# technically valid, and once on the my-page, if the value read back still looks like the
+# tail end of the old cycle, poll_for_fresh_barcode() waits it out in place (no re-login
+# needed) until the real rotation happens. The Oracle timer itself runs every 20s, so a 20s
+# lead only started the job anywhere from 0-20s early; live login took 10-12s and could consume
+# that entire margin. Across consecutive live cycles, the site's observed rotation also moved
+# up to ~47s earlier than the previous API TTL had predicted. A 90s selection window covers
+# one timer interval + that measured clock/TTL shift + a real ~20s pre-login margin, making
+# the first eligible tick land roughly 70-90s before the stored deadline. This stays within
+# the Oracle pair's 100s scrape budget even on a no-shift cycle, does not increase tick/Redis
+# frequency, and remains one scrape per ~20min cycle - the authenticated page simply waits
+# for the actual rotation when necessary.
+WARM_EARLY_LOGIN_LEAD_SECONDS = 90
 LAST_BARCODE_RETENTION = 7 * 24 * 60 * 60
 
 
@@ -314,7 +321,7 @@ def release_warm_lock(token):
         print(f"warm lock release failed: {exc}", flush=True)
 
 
-def record_warm_result(target, token, success, http_code=""):
+def record_warm_result(target, token, success, http_code="", release_lock=True):
     now = int(time.time())
     existing = get_warm_state(target)
     if success:
@@ -344,7 +351,8 @@ def record_warm_result(target, token, success, http_code=""):
             "last_http_code": http_code,
         }
     set_warm_state(target, state)
-    release_warm_lock(token)
+    if release_lock:
+        release_warm_lock(token)
     return state
 
 
@@ -579,7 +587,17 @@ def wait_for_tid_result(page, timeout_ms=10000):
     while time.monotonic() < end:
         url = safe_url(page)
         if page.is_closed(): return "closed"
-        if "/member/login/channel/tid" in url or "code=" in url or "/my" in url:
+        # A successful T ID callback can finish on the Universe home page instead of
+        # preserving `/member/login/channel/tid` or `/my` in the final URL.  Treat only a
+        # non-login Universe URL as success: the subsequent `/my` API read remains the
+        # authoritative authentication/barcode check, while avoiding a guaranteed 10s
+        # timeout after an already-completed login.
+        universe_login_finished = (
+            url.startswith("https://m.sktuniverse.co.kr")
+            and "/member/login" not in url
+            and "/netfunnel" not in url
+        )
+        if "/member/login/channel/tid" in url or "code=" in url or "/my" in url or universe_login_finished:
             print(f"debug T ID callback reached: {url}", flush=True)
             page.wait_for_timeout(800)
             return "callback"
@@ -588,15 +606,17 @@ def wait_for_tid_result(page, timeout_ms=10000):
     return "timeout"
 
 
-def wait_for_tworld_result(page, timeout_ms=12000):
+def wait_for_tworld_result(page, timeout_ms=12000, settle_ms=800):
     end = time.monotonic() + timeout_ms / 1000
     while time.monotonic() < end:
         if "m.tworld.co.kr" in safe_url(page):
-            page.wait_for_timeout(800)
+            if settle_ms:
+                page.wait_for_timeout(settle_ms)
             return "callback"
         time.sleep(0.2)
     if "m.tworld.co.kr" in safe_url(page):
-        page.wait_for_timeout(800)
+        if settle_ms:
+            page.wait_for_timeout(settle_ms)
         return "callback"
     print(f"debug T world result wait timed out at url={safe_url(page)} body={get_body_text(page, 200)}", flush=True)
     return "timeout"
