@@ -125,14 +125,24 @@ def redis_command(command, timeout=4):
         return None
 
 
+class RedisUnavailable(Exception):
+    pass
+
+
 def mget_padded(keys):
-    # Guarantees a list of exactly len(keys) elements. redis_command already returns None
-    # on any error, which the `or` below turns into an all-None list - but a *successful*
-    # MGET response, in the extremely unlikely event Upstash ever returned fewer entries
-    # than requested, would leave every call site here indexing off the end of the list
-    # (IndexError, 500) instead of just treating the missing ones as absent keys.
+    # Guarantees a list of exactly len(keys) elements on success. redis_command returns None
+    # on any error (network failure, Upstash error response, etc) - that case now raises
+    # RedisUnavailable instead of silently becoming an all-None list, because an all-None
+    # list is indistinguishable from "every key genuinely has no value", and callers treat
+    # those two situations very differently: select_warm_target() reads all-None state as
+    # "next_refresh_at=0 for everyone", i.e. every target is overdue, which would make
+    # warm_tick launch a real login scrape during a Redis outage - completely unnecessary
+    # work triggered by an infra hiccup, not an actual due barcode. Callers must catch this
+    # explicitly and fail closed (skip the scrape / return 503) instead of guessing.
     keys = list(keys)
-    values = redis_command(["MGET", *keys]) or []
+    values = redis_command(["MGET", *keys])
+    if values is None:
+        raise RedisUnavailable("Redis MGET failed")
     if len(values) != len(keys):
         values = (list(values) + [None] * len(keys))[:len(keys)]
     return values
@@ -140,6 +150,22 @@ def mget_padded(keys):
 
 def normalize_barcode_type(value):
     return "general" if value in ("general", "normal", "tworld") else "universe"
+
+
+def parse_seconds_left(raw, default=20 * 60):
+    # `int(raw or default)` looks equivalent but isn't: Python treats 0 as falsy, so a
+    # genuine `expireSeconds: 0` from the site (the barcode is right at the rotation
+    # boundary) would silently become `default` (1200) instead of the real 0. That matters
+    # here specifically because poll_for_fresh_barcode()'s early-lead polling loop keeps
+    # polling only while seconds_left looks "not fresh yet" - if a 0 gets turned into 1200,
+    # the loop sees an apparently-fresh 20-minute cycle and stops immediately, possibly
+    # caching the same barcode number that's about to (or just did) rotate.
+    if raw is None:
+        return default
+    try:
+        return max(0, int(raw))
+    except (TypeError, ValueError):
+        return default
 
 
 def cache_key(account_id, barcode_type="universe"):
@@ -237,7 +263,7 @@ def compute_failure_retry_delay(existing):
 
 def set_cached_barcode(account_id, number, seconds_left, barcode_type="universe", grade=""):
     barcode_type = normalize_barcode_type(barcode_type)
-    ttl = max(1, int(seconds_left or 1200))
+    ttl = max(1, parse_seconds_left(seconds_left))
     value = {
         "number": str(number),
         "expires_at": time.time() + ttl,
@@ -513,7 +539,7 @@ def fetch_barcode_data(page):
         body = result.get("body") or {}
         data = body.get("data") or {}
         number = re.sub(r"\D", "", str(data.get("otbNum") or ""))
-        seconds_left = int(data.get("expireSeconds") or 20 * 60)
+        seconds_left = parse_seconds_left(data.get("expireSeconds"))
         code = body.get("code") or ""
         message = body.get("message") or body.get("errorMessage") or ""
         return {
@@ -549,7 +575,7 @@ def fetch_tworld_membership_data(page):
         body = result.get("body") or {}
         data = body.get("data") or {}
         number = re.sub(r"\D", "", str(data.get("otbNum") or data.get("barcode") or ""))
-        seconds_left = int(data.get("expireSeconds") or 20 * 60)
+        seconds_left = parse_seconds_left(data.get("expireSeconds"))
         return {
             "status": result.get("status"),
             "resp_code": body.get("respCode"),
@@ -849,7 +875,15 @@ def warm_tick():
     lock_token = acquire_warm_lock()
     if not lock_token:
         return json_response({"status": "locked", "retry_after": 60})
-    target, state = select_warm_target(now)
+    try:
+        target, state = select_warm_target(now)
+    except RedisUnavailable:
+        # Don't guess a target when we can't actually read the schedule - the safe default
+        # (select_warm_target failing open) would launch a real login scrape for whichever
+        # target happens to sort first, purely because Redis hiccuped. Skip this tick; the
+        # next cron-job.org call (or client retrigger) picks up normally once Redis recovers.
+        release_warm_lock(lock_token)
+        return json_response({"status": "redis_unavailable"}, status=503)
     if not target:
         release_warm_lock(lock_token)
         return json_response({"status": "no_due", "now": now})
@@ -905,7 +939,14 @@ def warm_status():
     account_ids = list(dict.fromkeys(t["id"] for t in WARM_TARGETS))
     legacy_keys = [f"barcode:{aid}" for aid in account_ids]
     all_keys = [warm_current_key(), *state_keys, *cache_keys, *legacy_keys]
-    raw_values = mget_padded(all_keys)
+    try:
+        raw_values = mget_padded(all_keys)
+    except RedisUnavailable:
+        # Fabricating an all-empty response here would show every card as expired/idle
+        # instead of "we don't know right now" - a 503 makes the frontend's existing
+        # `if (!response.ok) return;` skip this poll and keep showing its last good state
+        # instead of flashing a false "만료됨" across every account.
+        return json_response({"status": "redis_unavailable"}, status=503)
     n = len(WARM_TARGETS)
     current_raw = raw_values[0]
     state_raws = raw_values[1:1 + n]

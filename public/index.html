@@ -61,7 +61,6 @@
 
             const cardContainer = document.getElementById('card-container');
             const BARCODE_VALID_TIME = 20 * 60;
-            const CLIENT_WARM_INTERVAL_MS = 3 * 60 * 1000;
             const fetchingCards = new Set();
             // Separate from fetchingCards above (which is keyed by accountId alone, and only
             // used to skip clobbering status text during a poll) - this one is keyed by
@@ -119,11 +118,15 @@
             // that used to run right before it were also duplicates of each other (both
             // fetched the same default-universe cache for all three accounts at page load);
             // this single call covers it.
+            // The old blind setInterval(runWarmWorker, 3min) ran regardless of whether
+            // anything was actually due - genuinely redundant given two things that already
+            // exist: cron-job.org hits /api/warm_tick every 1 minute externally (tighter than
+            // this 3min interval ever was), and refreshWarmStatus() below already calls
+            // runWarmWorker() reactively the moment its own poll sees a due target. Removing
+            // the blind interval doesn't remove either safety net, just the redundant one.
             runWarmWorker();
             refreshVisibleCaches();
-            refreshWarmStatus();
-            setInterval(runWarmWorker, CLIENT_WARM_INTERVAL_MS);
-            setInterval(refreshWarmStatus, 5 * 1000);
+            refreshWarmStatus().then(scheduleNextStatusPoll);
             setInterval(() => {
                 renderWarmStatusDetail();
                 updateVisibleCardTimers();
@@ -139,7 +142,7 @@
                 catchUpTimer = setTimeout(() => {
                     catchUpTimer = null;
                     refreshVisibleCaches();
-                    refreshWarmStatus();
+                    refreshWarmStatus().then(scheduleNextStatusPoll);
                     runWarmWorker();
                 }, 350);
             }
@@ -300,6 +303,31 @@
                 } catch (error) {
                     // Status display is best effort.
                 }
+            }
+
+            let statusPollTimer = null;
+
+            function nextStatusDelay() {
+                // Fixed 5s polling cost real Vercel invocations around the clock even when
+                // every account had 10+ minutes left and nothing was happening - tighten only
+                // when something is actually worth watching closely, relax otherwise.
+                if (document.hidden) return null; // pause entirely; catchUpAfterHidden resumes on refocus
+                if (!lastWarmStatusFetch) return 5000; // no first response yet, stay snappy until we have one
+                const { current, dueTargets, status, fetchedAtMs } = lastWarmStatusFetch;
+                if (current || dueTargets.length) return 3000; // a refresh is active or queued - watch closely
+                const elapsedSec = Math.max(0, Math.floor((Date.now() - fetchedAtMs) / 1000));
+                const dueSoon = (status.targets || []).some(target => (Number(target.seconds_left || 0) - elapsedSec) <= 60);
+                return dueSoon ? 5000 : 25000;
+            }
+
+            function scheduleNextStatusPoll() {
+                if (statusPollTimer) clearTimeout(statusPollTimer);
+                const delay = nextStatusDelay();
+                if (delay === null) return;
+                statusPollTimer = setTimeout(async () => {
+                    await refreshWarmStatus();
+                    scheduleNextStatusPoll();
+                }, delay);
             }
 
             function formatMinSec(seconds) {
