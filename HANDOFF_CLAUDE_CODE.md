@@ -3,9 +3,10 @@
 Date: 2026-07-16 KST
 Repository: `https://github.com/a77ila2000/T`
 Production URL: `https://preedgaonprime.vercel.app`
+Oracle fallback URL: `https://168-138-194-2.sslip.io`
 Main branch latest commit at this handoff: `e52262e Fix the real root cause of 100% general-barcode failure: wrong T-World API endpoint`
 
-**Biggest change this session: the actual login/scrape work now runs on the Oracle VM itself, not Vercel.** See "Oracle Worker Migration" below before touching anything scheduling/scraping-related - the old "Vercel does everything" mental model from earlier handoff revisions is now only half true.
+**Biggest change this session: both the login/scrape work and the read API now run on the Oracle VM, not Vercel.** Vercel serves only static HTML/CSS/JS. The browser calls `https://168-138-194-2.sslip.io` directly, so page views do not invoke Vercel Functions. See "Oracle Worker Migration" and "Oracle Read API" below before changing the hosting split.
 
 ## Goal
 
@@ -31,22 +32,21 @@ The desired UX:
 
 ## Runtime / Hosting
 
-- Frontend: static HTML/CSS/JS under `public/`. (Stale root-level `index.html`/`style.css` duplicates and an old `public/deploy-check.txt` artifact were deleted this session - `public/` was always the one actually served.)
-- Backend: Flask-compatible Vercel Python functions in `api/get_barcode.py` + shared pure logic in `api/barcode_core.py` (new 2026-07-16 - see "Oracle Worker Migration").
+- Frontend: static HTML/CSS/JS under `public/`, served by both Vercel and Caddy on Oracle. The frontend uses the absolute Oracle API base URL; it does not call same-origin Vercel API routes.
+- Read backend: `oracle/read_api.py`, a small Flask/Gunicorn service bound to `127.0.0.1:8080` on Oracle and exposed through Caddy HTTPS. It reads Upstash with one `MGET`, renders a cached SVG, and never imports Playwright or performs a login.
+- Vercel: static files only. `.vercelignore` excludes `api/`, `oracle/`, and tests, while `vercel.json` contains only static response headers. This also makes stale cron-job.org calls to `/api/warm_tick` hit no Vercel Function.
+- Legacy/fallback application code: `api/get_barcode.py` remains in the repository for reference and shared behavior, but it is no longer included in Vercel deployments.
+- Shared pure logic: `api/barcode_core.py` is used by the Oracle refresh worker and read API.
 - **Browser automation backend changed this session (2026-07-15)**: previously a paid Browserless.io cloud service; now a **self-hosted, open-source Browserless** (`browserless/chrome`, SSPL-1.0 license) Docker container on an Oracle Cloud "Always Free" ARM instance. See "Self-Hosted Browserless" below for full details and history.
-- **Who actually performs the login/scrape changed 2026-07-16**: a new persistent worker on the Oracle VM itself (`oracle/worker_tick.py`, run via systemd timer every 20s) now wins most of the real scrape attempts, since it polls far more often than Vercel's `warm_tick`. Vercel's own scrape path is untouched and still runs in parallel as a safety net (see "Oracle Worker Migration").
-- Vercel rewrites expose:
-  - `/api/get_barcode`
-  - `/api/warm_status`
-  - `/api/warm_tick`
-  - (`/api/warm_next` and `/api/warm_done` were **removed** in the 2026-07-15 session - see "Refresh Path Consolidation" below)
+- **Who performs login/scrape**: only `oracle/worker_tick.py`, run by a systemd timer every 20 seconds. The old Vercel scrape files remain in Git history/repository context but `.vercelignore` keeps them out of deployments.
+- Oracle Caddy exposes `/api/get_barcode`, `/api/warm_status`, `/healthz`, and the static fallback page. There is deliberately no public refresh-trigger endpoint.
 - **GitHub Actions workflow removed in the 2026-07-15 session** (`.github/workflows/warm-barcodes.yml` deleted, commit `1126119`). Its free-tier `on: schedule` cron was confirmed via `gh run list` to fire wildly irregularly (multi-hour gaps instead of the configured 3 minutes) and was fully redundant with cron-job.org below.
-- **cron-job.org (external, free)**: hits `/api/warm_tick` every 1 minute. Deliberately **kept running** after the 2026-07-16 Oracle migration as a safety net - see "Oracle Worker Migration" for the planned wind-down.
-- The frontend also drives refreshes client-side while a tab is open, purely event-driven now (no blind interval - the old 3-minute `setInterval(runWarmWorker, ...)` was removed 2026-07-16 as redundant with cron-job.org's tighter 1-minute cadence and the reactive due-target trigger already inside `refreshWarmStatus()`) - see "Current Frontend Behavior".
+- **cron-job.org**: the old job may still request Vercel `/api/warm_tick`, but that route is no longer deployed and therefore cannot invoke a Vercel Function. It can be disabled at any time.
+- The frontend never drives refreshes. It reads status/cache only; the Oracle timer owns all scheduling and refresh execution.
 
 ## Required Environment Variables
 
-Do not commit secret values. These names must exist in Vercel Production and Preview:
+Do not commit secret values. These names must exist in `/opt/tworld-worker/.env` on Oracle:
 
 - `ENCRYPTION_KEY`
 - `ENCRYPTED_ACCOUNTS`
@@ -56,9 +56,17 @@ Do not commit secret values. These names must exist in Vercel Production and Pre
 - `UPSTASH_REDIS_REST_URL`
 - `UPSTASH_REDIS_REST_TOKEN`
 
-Upstash Redis is the cache and scheduler state source (sole source of truth - see "Redis as source of truth" below).
+Upstash Redis is the cache and scheduler state source (sole source of truth - see "Redis as source of truth" below). Vercel no longer needs these variables because it deploys no Python Functions. On Oracle, `BROWSERLESS_WS_URL` is overridden to `ws://localhost:3000`.
 
-**The Oracle worker needs its own copy of these same values** (except `BROWSERLESS_WS_URL`, overridden there to `ws://localhost:3000` since it talks to Browserless locally instead of over the internet) - see "Oracle Worker Migration" for the file location and why `vercel env pull` couldn't be used to fetch them automatically.
+## Oracle Read API (2026-07-16)
+
+- `oracle/read_api.py` has no scrape path. `/api/get_barcode` performs one Redis `MGET`, returns the valid or last stale barcode as SVG, and exposes the existing `X-Barcode-*` headers for the unchanged frontend display logic.
+- `/api/warm_status` reads current state, six scheduler states, six cache keys, and three legacy keys in one `MGET`, matching the optimized Vercel status response shape.
+- Cross-origin response and exposed-header settings allow the Vercel static page to read Oracle directly without a proxy.
+- `oracle/tworld-api.service` runs one Gunicorn worker with two threads on `127.0.0.1:8080`.
+- `oracle/Caddyfile` terminates HTTPS for `168-138-194-2.sslip.io`, proxies `/api/*` and `/healthz`, and serves `public/` as the Vercel-independent fallback page.
+- Oracle Cloud's security list must allow inbound TCP 80 and 443 for Caddy certificate issuance and HTTPS traffic. Browserless remains on port 3000 for the refresh worker.
+- Deploy the unit to `/etc/systemd/system/tworld-api.service`, the Caddyfile to `/etc/caddy/Caddyfile`, then run `systemctl daemon-reload`, `systemctl enable --now tworld-api caddy`.
 
 ## Self-Hosted Browserless (new this session)
 

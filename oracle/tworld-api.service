@@ -1,0 +1,18 @@
+[Unit]
+Description=T-World barcode read-only API
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=tworld
+Group=tworld
+WorkingDirectory=/opt/tworld-worker/repo
+EnvironmentFile=/opt/tworld-worker/.env
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/opt/tworld-worker/venv/bin/gunicorn --workers 1 --threads 2 --bind 127.0.0.1:8080 --timeout 30 --access-logfile - --error-logfile - oracle.read_api:app
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

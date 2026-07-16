@@ -1,0 +1,21 @@
+168-138-194-2.sslip.io {
+    encode zstd gzip
+
+    handle /api/* {
+        reverse_proxy 127.0.0.1:8080
+    }
+
+    handle /healthz {
+        reverse_proxy 127.0.0.1:8080
+    }
+
+    handle {
+        root * /opt/tworld-worker/repo/public
+        try_files {path} /index.html
+        file_server
+    }
+
+    header {
+        Cache-Control "no-store, max-age=0"
+    }
+}
