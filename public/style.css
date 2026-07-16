@@ -1,6 +1,7 @@
 @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@400;500;700&display=swap');
 
 :root {
+    color-scheme: light dark;
     --bg-color: #f0f2f5;
     --card-bg: #ffffff;
     --primary-color: #e81e22;
@@ -300,4 +301,56 @@ header h1 {
 
 .hidden {
     display: none;
+}
+
+/* Samsung Internet can respect this authored theme instead of force-darkening the light
+   page heuristically. This preserves the dark UI while the barcode subtree stays only-light. */
+@media (prefers-color-scheme: dark) {
+    :root {
+        --bg-color: #101116;
+        --card-bg: #1f1f1f;
+        --primary-color: #ff7479;
+        --text-color: #f1f1f1;
+        --text-light: #b7b7b7;
+        --border-color: #555555;
+    }
+
+    .warm-status-detail {
+        background-color: var(--card-bg);
+    }
+
+    .warm-status-detail .value.fresh {
+        color: #81c784;
+    }
+
+    .warm-status-detail .value.stale {
+        color: #ff8a80;
+    }
+
+    .warm-status-detail .value.active,
+    .timer {
+        color: #64b5f6;
+    }
+
+    .warm-status-detail .value.queued {
+        color: #ffb74d;
+    }
+
+    .benefit-box {
+        background-color: #241b1c;
+        border-color: #684547;
+    }
+
+    .btn.secondary {
+        background-color: #505050;
+        color: #f1f1f1;
+    }
+
+    .btn.secondary:hover {
+        background-color: #5c5c5c;
+    }
+
+    .links-container a {
+        background-color: #3a2224;
+    }
 }
