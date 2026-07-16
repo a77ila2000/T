@@ -2,3 +2,4 @@ Flask==2.3.3
 cryptography
 playwright
 Pillow
+gunicorn

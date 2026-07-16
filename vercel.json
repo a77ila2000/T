@@ -1,18 +1,4 @@
 {
-  "rewrites": [
-    {
-      "source": "/api/get_barcode",
-      "destination": "/api/get_barcode.py"
-    },
-    {
-      "source": "/api/warm_status",
-      "destination": "/api/warm_status.py"
-    },
-    {
-      "source": "/api/warm_tick",
-      "destination": "/api/warm_tick.py"
-    }
-  ],
   "headers": [
     {
       "source": "/(.*)",
@@ -23,16 +9,5 @@
         }
       ]
     }
-  ],
-  "functions": {
-    "api/get_barcode.py": {
-      "maxDuration": 60
-    },
-    "api/warm_status.py": {
-      "maxDuration": 30
-    },
-    "api/warm_tick.py": {
-      "maxDuration": 60
-    }
-  }
+  ]
 }

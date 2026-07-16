@@ -25,6 +25,9 @@
 
     <script>
         document.addEventListener('DOMContentLoaded', () => {
+            // The browser calls Oracle directly. There is no Vercel Function proxy in
+            // this path, so normal page views consume no Vercel Function CPU.
+            const API_BASE = 'https://168-138-194-2.sslip.io';
             const accounts = [
                 { user: '나', id: 'a77ila2000' },
                 { user: '어머니', id: 'a77ila10004' },
@@ -68,7 +71,6 @@
             // simultaneous triggers for the same account+type (e.g. a tab regaining focus
             // right as the 5s status poll also fires) would both fire actual HTTP requests.
             const inFlightFetches = new Set();
-            let warmWorkerRunning = false;
             let lastWarmStatusFetch = null;
             const lastKnownSuccessAt = {};
 
@@ -118,13 +120,8 @@
             // that used to run right before it were also duplicates of each other (both
             // fetched the same default-universe cache for all three accounts at page load);
             // this single call covers it.
-            // The old blind setInterval(runWarmWorker, 3min) ran regardless of whether
-            // anything was actually due - genuinely redundant given two things that already
-            // exist: cron-job.org hits /api/warm_tick every 1 minute externally (tighter than
-            // this 3min interval ever was), and refreshWarmStatus() below already calls
-            // runWarmWorker() reactively the moment its own poll sees a due target. Removing
-            // the blind interval doesn't remove either safety net, just the redundant one.
-            runWarmWorker();
+            // Refreshing is owned by the Oracle systemd worker. The browser only reads its
+            // cached result and never starts a login/scrape request itself.
             refreshVisibleCaches();
             refreshWarmStatus().then(scheduleNextStatusPoll);
             setInterval(() => {
@@ -143,7 +140,6 @@
                     catchUpTimer = null;
                     refreshVisibleCaches();
                     refreshWarmStatus().then(scheduleNextStatusPoll);
-                    runWarmWorker();
                 }, 350);
             }
             document.addEventListener('visibilitychange', catchUpAfterHidden);
@@ -215,7 +211,7 @@
 
             async function refreshWarmStatus() {
                 try {
-                    const response = await fetch(`/api/warm_status?t=${Date.now()}`, { cache: 'no-store' });
+                    const response = await fetch(`${API_BASE}/api/warm_status?t=${Date.now()}`, { cache: 'no-store' });
                     if (!response.ok) return;
                     const status = await response.json();
                     const current = status.current;
@@ -225,15 +221,10 @@
                         .filter(target => !(current && current.id === target.id && current.type === target.type))
                         .sort((a, b) => (a.next_refresh_at - b.next_refresh_at) || (a.index - b.index));
 
-                    if (!current && dueTargets.length && !warmWorkerRunning) {
-                        runWarmWorker();
-                    }
-
                     // This is the only recurring re-fetch of the visible barcode image left
                     // (refreshVisibleCaches itself only runs once, at page load, plus on
                     // tab-refocus) - detecting last_success_at moving forward here (every 5s)
-                    // and immediately re-fetching covers every real refresh, whether driven by
-                    // this tab's own runWarmWorker or triggered externally by cron-job.org.
+                    // and immediately re-fetching covers every real Oracle worker refresh.
                     (status.targets || []).forEach(target => {
                         const key = `${target.id}:${target.type}`;
                         const previousSuccessAt = lastKnownSuccessAt[key];
@@ -419,45 +410,6 @@
                 });
             }
 
-            async function runWarmWorker() {
-                // Single call to /api/warm_tick - it acquires the lock, picks the target,
-                // performs the scrape, and records the result/releases the lock all in one
-                // server-side request (the exact same path cron-job.org uses every minute).
-                // Previously this was a 3-step client dance (warm_next -> get_barcode?warm=1
-                // -> warm_done); the middle step's returned barcode image was never even used
-                // (immediately discarded, then re-fetched via cache_only below anyway), so
-                // collapsing to one round trip changes nothing observable.
-                if (warmWorkerRunning) return;
-                warmWorkerRunning = true;
-                try {
-                    const controller = new AbortController();
-                    const timeoutId = setTimeout(() => controller.abort(), 65000);
-                    const response = await fetch(`/api/warm_tick?t=${Date.now()}`, {
-                        cache: 'no-store',
-                        signal: controller.signal
-                    });
-                    clearTimeout(timeoutId);
-                    if (!response.ok) return;
-                    const result = await response.json();
-                    if (result.status === 'locked') {
-                        setTimeout(refreshWarmStatus, 1000);
-                        return;
-                    }
-                    if (result.status !== 'done') return;
-                    refreshWarmStatus();
-                    if (result.success) {
-                        const card = document.getElementById(`card-${result.id}`);
-                        if (card && card.dataset.currentType === result.type) {
-                            fetchBarcode(result.id, result.type, { cacheOnly: true, preserveDisplay: false });
-                        }
-                    }
-                } catch (error) {
-                    // Best effort - the next interval tick (or cron-job.org) will retry.
-                } finally {
-                    warmWorkerRunning = false;
-                }
-            }
-
             async function fetchBarcode(accountId, barcodeType, options = {}) {
                 const card = document.getElementById(`card-${accountId}`);
                 const img = card.querySelector(`img[data-id="${accountId}"]`);
@@ -499,14 +451,14 @@
                 if (!preserveDisplay) {
                     loader.classList.remove('hidden');
                     buttons.forEach(button => button.disabled = true);
-                    statusEl.textContent = `${barcodeTypes[barcodeType]}를 실시간으로 생성 중입니다...`;
+                    statusEl.textContent = `${barcodeTypes[barcodeType]}를 불러오는 중입니다...`;
                 }
 
                 try {
                     const controller = new AbortController();
-                    const timeoutId = setTimeout(() => controller.abort(), 55000);
+                    const timeoutId = setTimeout(() => controller.abort(), 8000);
                     const cacheOnlyParam = options.cacheOnly ? '&cache_only=1' : '';
-                    const response = await fetch(`/api/get_barcode?id=${accountId}&type=${barcodeType}${cacheOnlyParam}&t=${Date.now()}`, {
+                    const response = await fetch(`${API_BASE}/api/get_barcode?id=${accountId}&type=${barcodeType}${cacheOnlyParam}&t=${Date.now()}`, {
                         cache: 'no-store',
                         signal: controller.signal
                     });
@@ -568,7 +520,6 @@
                         statusEl.textContent = barcodeNumber
                             ? `마지막 ${barcodeTypes[barcodeType]}를 표시 중입니다. 순차 갱신 대기 중입니다. (${barcodeNumber})`
                             : `마지막 ${barcodeTypes[barcodeType]}를 표시 중입니다. 순차 갱신 대기 중입니다.`;
-                        runWarmWorker();
                     } else {
                         statusEl.textContent = barcodeNumber ? `${barcodeTypes[barcodeType]}가 생성되었습니다. (${barcodeNumber})` : `${barcodeTypes[barcodeType]}가 생성되었습니다.`;
                         startTimer(accountId, barcodeType, secondsLeft);
@@ -613,7 +564,6 @@
                         if (img.dataset.refreshQueued !== '1') {
                             img.dataset.refreshQueued = '1';
                             statusEl.textContent = '20분이 지나 순차 갱신 대기 중입니다.';
-                            runWarmWorker();
                         }
                     }
                 };
