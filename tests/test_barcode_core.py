@@ -80,21 +80,21 @@ class TestSelectWarmTargetEarlyLead:
         target, _ = bc.select_warm_target(now)
         assert target is not None and target["name"] == "me-universe"
 
-    def test_lead_includes_timer_ttl_skew_and_login_margin(self, _isolate_redis):
-        # The live TTL estimate drifted ~12s from rotation in addition to the 20s timer.
-        # A 60s window leaves a real pre-login margin without increasing tick frequency.
+    def test_lead_includes_timer_observed_rotation_shift_and_login_margin(self, _isolate_redis):
+        # Rotation moved up to ~47s earlier than the preceding API TTL predicted. Together
+        # with the 20s timer, a 90s window leaves a real login margin without more ticks.
         now = int(time.time())
         for t in bc.WARM_TARGETS:
             _isolate_redis[bc.warm_state_key(t["id"], t["type"])] = json.dumps(
                 {"next_refresh_at": now + 5000}
             )
         _isolate_redis[bc.warm_state_key("a77ila2000", "universe")] = json.dumps(
-            {"next_refresh_at": now + 55}
+            {"next_refresh_at": now + 85}
         )
 
         target, _ = bc.select_warm_target(now)
 
-        assert bc.WARM_EARLY_LOGIN_LEAD_SECONDS == 60
+        assert bc.WARM_EARLY_LOGIN_LEAD_SECONDS == 90
         assert target is not None and target["name"] == "me-universe"
 
     def test_failure_backoff_does_not_get_early_lead(self, _isolate_redis):
