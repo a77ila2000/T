@@ -1,9 +1,11 @@
 # Claude Code Handoff - T Family Barcode
 
-Date: 2026-07-15 KST
+Date: 2026-07-16 KST
 Repository: `https://github.com/a77ila2000/T`
 Production URL: `https://preedgaonprime.vercel.app`
-Main branch latest commit at this handoff: `7d73897 Consolidate refresh path to warm_tick, batch Redis reads, dedupe frontend polling`
+Main branch latest commit at this handoff: `50a5b8d Add systemd unit files for the Oracle worker`
+
+**Biggest change this session: the actual login/scrape work now runs on the Oracle VM itself, not Vercel.** See "Oracle Worker Migration" below before touching anything scheduling/scraping-related - the old "Vercel does everything" mental model from earlier handoff revisions is now only half true.
 
 ## Goal
 
@@ -30,16 +32,17 @@ The desired UX:
 ## Runtime / Hosting
 
 - Frontend: static HTML/CSS/JS under `public/`. (Stale root-level `index.html`/`style.css` duplicates and an old `public/deploy-check.txt` artifact were deleted this session - `public/` was always the one actually served.)
-- Backend: Flask-compatible Vercel Python functions in `api/get_barcode.py`.
-- **Browser automation backend changed this session**: previously a paid Browserless.io cloud service; now a **self-hosted, open-source Browserless** (`browserless/chrome`, SSPL-1.0 license) Docker container on an Oracle Cloud "Always Free" ARM instance. See "Self-Hosted Browserless" below for full details and history.
+- Backend: Flask-compatible Vercel Python functions in `api/get_barcode.py` + shared pure logic in `api/barcode_core.py` (new 2026-07-16 - see "Oracle Worker Migration").
+- **Browser automation backend changed this session (2026-07-15)**: previously a paid Browserless.io cloud service; now a **self-hosted, open-source Browserless** (`browserless/chrome`, SSPL-1.0 license) Docker container on an Oracle Cloud "Always Free" ARM instance. See "Self-Hosted Browserless" below for full details and history.
+- **Who actually performs the login/scrape changed 2026-07-16**: a new persistent worker on the Oracle VM itself (`oracle/worker_tick.py`, run via systemd timer every 20s) now wins most of the real scrape attempts, since it polls far more often than Vercel's `warm_tick`. Vercel's own scrape path is untouched and still runs in parallel as a safety net (see "Oracle Worker Migration").
 - Vercel rewrites expose:
   - `/api/get_barcode`
   - `/api/warm_status`
   - `/api/warm_tick`
-  - (`/api/warm_next` and `/api/warm_done` were **removed** this session - see "Refresh Path Consolidation" below)
-- **GitHub Actions workflow removed this session** (`.github/workflows/warm-barcodes.yml` deleted, commit `1126119`). Its free-tier `on: schedule` cron was confirmed via `gh run list` to fire wildly irregularly (multi-hour gaps instead of the configured 3 minutes) and was fully redundant with cron-job.org below.
-- **cron-job.org (external, free)**: hits `/api/warm_tick` every 1 minute. This is now the **sole external background driver**.
-- The frontend also drives refreshes client-side while a tab is open (`runWarmWorker()`, every 3 minutes plus event-driven triggers) - see "Current Frontend Behavior".
+  - (`/api/warm_next` and `/api/warm_done` were **removed** in the 2026-07-15 session - see "Refresh Path Consolidation" below)
+- **GitHub Actions workflow removed in the 2026-07-15 session** (`.github/workflows/warm-barcodes.yml` deleted, commit `1126119`). Its free-tier `on: schedule` cron was confirmed via `gh run list` to fire wildly irregularly (multi-hour gaps instead of the configured 3 minutes) and was fully redundant with cron-job.org below.
+- **cron-job.org (external, free)**: hits `/api/warm_tick` every 1 minute. Deliberately **kept running** after the 2026-07-16 Oracle migration as a safety net - see "Oracle Worker Migration" for the planned wind-down.
+- The frontend also drives refreshes client-side while a tab is open, purely event-driven now (no blind interval - the old 3-minute `setInterval(runWarmWorker, ...)` was removed 2026-07-16 as redundant with cron-job.org's tighter 1-minute cadence and the reactive due-target trigger already inside `refreshWarmStatus()`) - see "Current Frontend Behavior".
 
 ## Required Environment Variables
 
@@ -54,6 +57,8 @@ Do not commit secret values. These names must exist in Vercel Production and Pre
 - `UPSTASH_REDIS_REST_TOKEN`
 
 Upstash Redis is the cache and scheduler state source (sole source of truth - see "Redis as source of truth" below).
+
+**The Oracle worker needs its own copy of these same values** (except `BROWSERLESS_WS_URL`, overridden there to `ws://localhost:3000` since it talks to Browserless locally instead of over the internet) - see "Oracle Worker Migration" for the file location and why `vercel env pull` couldn't be used to fetch them automatically.
 
 ## Self-Hosted Browserless (new this session)
 
@@ -70,11 +75,40 @@ Upstash Redis is the cache and scheduler state source (sole source of truth - se
 
 **SSH access note**: the ARM server's key is `ssh-key-2026-07-14.key` in `C:\Users\MBJ\Desktop\서버키\` (confirmed working). A recovery keypair (`recovery-key` / `recovery-key.pub`) also exists in that folder from earlier troubleshooting of the (now-terminated) AMD server's lost SSH access - that issue is moot now that the AMD servers are gone.
 
-**Capability note**: Claude Code's Bash/PowerShell tools run directly on the operator's own PC and can read/write files anywhere on it (e.g. the SSH key folder) - there is no separate sandboxed filesystem. SSH itself (actually connecting out to the Oracle servers) hasn't been exercised directly this way, but reading the key files to construct such a command is not blocked.
+**Capability note**: Claude Code's Bash/PowerShell tools run directly on the operator's own PC and can read/write files anywhere on it (e.g. the SSH key folder) - there is no separate sandboxed filesystem. **Confirmed 2026-07-16**: SSH to the Oracle server (`ssh -i "C:\Users\MBJ\Desktop\서버키\ssh-key-2026-07-14.key" ubuntu@168.138.194.2`) works fine from this environment, including passwordless `sudo`, and was used extensively to deploy the Oracle worker - see "Oracle Worker Migration".
 
 ### SSO fast-path (tried, then fully reverted)
 
 For a while this session, universe-type logins used a discovered shortcut: clicking the "구독중"/"인증대기" subscription badge (or the more stable "다음 결제일" text) on an already-logged-in tworld my-page triggers a popup that authenticates on `sktuniverse.co.kr` **without** the T-ID/recaptcha flow. This was fully implemented, iterated on (stealth-mode conflicts, server-contention issues), then **entirely reverted** (commit `26e1b9a`) once the new ARM server made the plain T-ID/recaptcha flow fast enough (~31-38s) to comfortably fit Vercel's 60s budget on its own. All related code (`login_state` helpers, the `warm_tick` 202/`pending_step2` branch, `/api/sso_debug`) was removed as dead code in commits `1126119` and `77a2bc9`. Mentioned here only so a future "why not just use the SSO shortcut again" idea has context on why it was abandoned (added complexity/fragility, not a functional dead end).
+
+## Oracle Worker Migration (2026-07-16 session)
+
+**Why**: Vercel Hobby's Fluid Active CPU free tier is 4 hours/month. The usage dashboard showed a daily-CPU chart climbing to 16-38 min/day, on pace to hit 5-8 hours/month - roughly double the free limit. The dominant remaining cost (after the cache-hit-path fixes below) is believed to be the actual Playwright login/scrape itself, which runs on Vercel ~432 times/day (6 targets x ~3 refreshes/hour, each up to 50-60s of Vercel wall time). The fix: run that scrape loop on the Oracle VM instead, which already hosts Browserless, has spare capacity, and isn't billed per-CPU-second.
+
+**What changed**:
+
+1. **`api/barcode_core.py`** (new) - all the pure Redis/locking/scheduling/scraping logic that used to live only in `get_barcode.py` was extracted here verbatim (no behavior change, verified via a full regression pass comparing outputs before/after). `get_barcode.py` now imports from it and keeps only the Flask routes, image rendering, and the Vercel-specific `SCRAPE_BUDGET_SECONDS`/`signal.alarm`/`mark()` 60s-kill workaround (which has no equivalent need on Oracle - see point 3).
+   - **Gotcha hit during this split**: Vercel invokes `api/get_barcode.py` directly as the `/api/get_barcode` entrypoint, which does **not** put its own directory on `sys.path` for sibling imports - that's exactly why `warm_status.py`/`warm_tick.py` already had `sys.path.append(os.path.dirname(__file__))` before importing `get_barcode` as a module. `get_barcode.py`'s own new `from barcode_core import ...` needed the same fix (commit `f4679f5`) after a live 500 `FUNCTION_INVOCATION_FAILED` on `/api/get_barcode` right after the split deployed (`/api/warm_status` kept working the whole time since it inherits the fix via importing `get_barcode`).
+2. **`oracle/worker_tick.py`** (new) - a standalone script, **not** deployed to Vercel (no `vercel.json` route), that does exactly what one `warm_tick()` call does: `acquire_warm_lock` -> `select_warm_target` (unchanged scheduling logic, same function from `barcode_core`) -> `acquire_browser_lock` -> scrape -> `set_cached_barcode`/`record_warm_result` -> exit. `perform_scrape()` mirrors `get_barcode.py`'s `perform_barcode_request()` scrape body step-for-step but connects to Browserless via `ws://localhost:3000` (no internet hop) instead of the public URL, and returns plain values instead of Flask responses.
+   - **Deliberate design choice**: one-shot script re-run by a systemd **timer**, not a persistent `while True` process. A hung cycle is killed cleanly by an OS-level `timeout` wrapper rather than needing an in-process watchdog thread (unreliable for interrupting a stuck synchronous Playwright call from another thread), and a fresh process each tick avoids any long-running-process resource leak. This mirrors today's serverless "spin up, do one thing, exit" model, just relocated - deliberately **not** the "sleep until the next computed due time" shape some early proposals suggested, per this project's repeated bad experience with scheduling cleverness (see commit history around same-account chaining, below).
+3. **Oracle server deployment** (`168.138.194.2`, SSH key `C:\Users\MBJ\Desktop\서버키\ssh-key-2026-07-14.key`, user `ubuntu` with passwordless `sudo`):
+   - Dedicated non-login system user `tworld` (not `ubuntu`) owns everything under `/opt/tworld-worker/`.
+   - `/opt/tworld-worker/repo` is a `git clone` of this same repo (so `barcode_core.py`/`worker_tick.py` update via `git pull`, not manual file edits) - as `tworld`: `git -C /opt/tworld-worker/repo pull --ff-only`.
+   - `/opt/tworld-worker/venv` - Python venv with `cryptography` + `playwright` (client library only; no `playwright install chromium` needed since it connects to the already-running Browserless container, doesn't launch its own browser).
+   - `/opt/tworld-worker/.env` (mode 600, owned by `tworld`) holds the 6 env vars listed above. **`vercel env pull` could not retrieve real values for the custom "Encrypted" vars** (system vars like `VERCEL_ENV` pulled fine, but `ENCRYPTION_KEY`/`ENCRYPTED_ACCOUNTS`/etc. consistently came back empty via CLI pull, cause not root-caused - possibly a permissions/team-scope quirk) - the user ended up providing `ENCRYPTION_KEY`/`ENCRYPTED_ACCOUNTS` directly, `BROWSERLESS_TOKEN` was recovered from the Browserless Docker container's own env (`sudo docker inspect browserless --format '{{range .Config.Env}}{{println .}}{{end}}'`), and `UPSTASH_REDIS_REST_URL`/`TOKEN` came from the Upstash console's "Connect > REST" tab. If this needs redoing, try that combination of sources rather than `vercel env pull` first.
+   - `/etc/systemd/system/tworld-worker.service` (`Type=oneshot`, `ExecStart=timeout 100 /opt/tworld-worker/venv/bin/python3 /opt/tworld-worker/repo/oracle/worker_tick.py`, `EnvironmentFile=/opt/tworld-worker/.env`) + `tworld-worker.timer` (`OnUnitActiveSec=20s`) - both copied from `oracle/tworld-worker.service`/`oracle/tworld-worker.timer` in this repo, then `sudo systemctl daemon-reload && sudo systemctl enable --now tworld-worker.timer`.
+   - Check it's alive: `sudo systemctl status tworld-worker.timer` and `sudo journalctl -u tworld-worker -f` (or `-n 40` for recent history).
+4. **Verified live 2026-07-16**: manual single-cycle run succeeded end-to-end (real T-ID login, real barcode fetched, Redis updated, ~2.7s CPU consumed per `systemd`'s own accounting). After enabling the timer, it automatically caught and successfully refreshed multiple real targets with zero manual triggering (including one case of 3 consecutive `tworld_barcode_not_found` failures on `mother-general` self-healing via the pre-existing immediate-retry logic, then succeeding - normal transient-failure handling, not a new bug). Confirmed via `warm_status` that results written by the Oracle worker are immediately visible through Vercel's existing read path with zero frontend changes needed.
+5. **Current state / what's NOT done yet**: cron-job.org (every 1 min) and Vercel's own `warm_tick` are **deliberately left running unchanged** as a parallel safety net - the existing global Redis locks (`warm_lock`/`browser_lock`) already make dual-writer operation safe (whichever fires first wins, no code change needed), confirmed live via repeated "warm lock busy - another tick (Vercel or this worker) is running, skipping" log lines showing both systems actively contending. **Remaining steps** (not yet done, needs a few days of parallel observation first): confirm via the Vercel usage dashboard that CPU hours actually dropped, then reduce cron-job.org's frequency (e.g. 1min -> 15min, kept as a reduced-but-present backstop) - do **not** strip any code from `get_barcode.py`/`vercel.json`, the savings come from invoking `warm_tick` less often, not from deleting the fallback path.
+
+## Session Fixes (2026-07-16, before the Oracle migration)
+
+1. **Per-card timer/status freezing during active refresh** (commit `27cc7ac`): the card's own "만료됨 (M:SS 경과)" timer and status text were gated on `img.dataset.stale`, a DOM flag only set once an actual `fetchBarcode` response came back - with no tab-refocus event to force one, that meant the card froze at whatever text it had at the moment of local expiry for the entire refresh duration, while the status panel above (driven by the same `warm_status` poll) correctly ticked through "갱신 중 (M:SS 경과)" live. Fixed by deriving "is this due" from the live poll data (`isActive`/`dueTargets`/`remaining`) instead of the lagging DOM flag, in both `refreshWarmStatus()`'s per-card block and `updateVisibleCardTimers()`.
+2. **Vercel CPU reduction, cache-hit path** (commits `83242b9`, `7acae8a`): `decrypt_accounts()` used to run unconditionally before the cache-hit fast path, `barcode_response()` re-rendered the Code128 PNG pixel-by-pixel on every single call even for an unchanged still-valid number, `open_barcode_view()`'s fallback loop called `get_body_text()` (a real CDP round-trip) twice per iteration for the same instant, and `warm_status()`'s legacy-key MGET fetched the same 3 account ids twice (WARM_TARGETS has 2 entries per account). All four fixed: decrypt deferred past the cache checks, PNG bytes cached in a module-level dict keyed by number (safe - pixels depend only on the digit string), `get_body_text()` calls deduped, legacy MGET deduped (19 -> 16 keys).
+3. **`expireSeconds: 0` truthiness bug** (commit `822e09b`): `int(x or 20*60)` treats a real `0` (barcode exactly at its rotation boundary) the same as a missing field, silently turning it into 1200 - could make the early-lead poll (`poll_for_fresh_barcode`) think a stale cycle was already fresh and stop polling early. Added `parse_seconds_left()` (explicit `is None` check) in `barcode_core.py`, used everywhere `expireSeconds`/`seconds_left` gets parsed.
+4. **Redis MGET failure indistinguishable from "no data"** (commit `822e09b`): `mget_padded()` used to turn a Redis outage into an all-None list, identical to "every key genuinely empty" - `select_warm_target()` would then see every target as overdue and launch a real login scrape purely because Redis hiccuped. Added `RedisUnavailable` (raised on failure), `warm_tick`/`warm_status` now fail closed (503, no guessing) instead.
+5. **Frontend adaptive polling** (commit `822e09b`): `warm_status` was polled on a flat 5s interval around the clock. Replaced with a self-rescheduling chain (`nextStatusDelay()`/`scheduleNextStatusPoll()`): 3s while a refresh is active/queued, 5s when something's due within 60s, 25s otherwise, paused entirely while the tab is hidden (resumes via the existing `catchUpAfterHidden` refocus handler). Verified live: steady-state ~25.4s gaps between polls in a real deployed tab.
+6. All of the above (items 2-5) were originally raised by an external ("Codex") code review the user pasted in as screenshots; each claim was independently re-verified against the actual current code (not taken on faith) before being adopted - two other suggestions from that same review (matching Browserless's `CONCURRENT` env var to actual usage, adding a unit-test/CI suite) were deliberately **not** applied as low-value or out-of-scope for that pass.
 
 ## Important Files
 
@@ -217,11 +251,32 @@ Also batched in the same pass: `select_warm_target()` and `warm_status()` used t
 1. Vercel serverless: if a request gets hard-killed past its `maxDuration`, the `finally` block (lock release) never runs - self-heals via each lock's own TTL (`WARM_LOCK_TTL=75`, browser lock `90s`). This is a known, accepted tradeoff, not a bug.
 2. A single transient warm-tick failure was observed and confirmed self-healing via the existing immediate-retry-on-first-failure logic (`compute_failure_retry_delay`) during this session's monitoring pass - working as designed.
 3. Browserless connection/timeouts can still surface as 502/504/423 (423 = another refresh already running; 502 = login/extraction failed; 504 = timed out) - expected occasional failure modes, handled by the retry/backoff logic.
-4. Deferred (reviewed, not applied): staging `submit_tid_credentials()`'s login-button submission more defensively (check between each attempt instead of firing several unconditionally once past the first early-exit check), and distinguishing required-vs-optional `goto_page()` navigations so a failed required hop fails fast instead of relying solely on the overall `mark()` time budget to catch it. Both touch the most fragile, most-tuned part of the codebase for a comparatively small payoff - revisit only if actually causing observed failures.
-5. Bigger, deliberately-not-started idea: move the warm-refresh worker off Vercel entirely and run it as a persistent process directly on the Oracle ARM server (which already hosts Browserless) - would eliminate the CDP-over-network hop, Vercel's 60s budget pressure, the external cron dependency, and the Redis-based distributed locking, since a single local process naturally serializes without needing any of that. Real potential, but a separate architecture project, not a quick patch.
+4. Deferred (reviewed, agreed on scope, not yet implemented as of 2026-07-16 - see project memory `project_goto_page_hard_failure`): `goto_page()` in `barcode_core.py` currently swallows every navigation exception uniformly (timeouts, benign `net::ERR_ABORTED` redirect races, and genuine unrecoverable network failures all get the same "log and return None" treatment) - the only safety net is `mark()`'s overall elapsed-time budget, not per-navigation failure detection. Agreed direction: add an opt-in `required=True` param, classify hard failures via an **allowlist** (not denylist) of specific net error substrings (`ERR_NAME_NOT_RESOLVED`, `ERR_CONNECTION_REFUSED`, `ERR_CONNECTION_RESET`, `ERR_CONNECTION_CLOSED`, `ERR_CONNECTION_TIMED_OUT`, `ERR_INTERNET_DISCONNECTED`, `ERR_ADDRESS_UNREACHABLE`, `ERR_EMPTY_RESPONSE` - deliberately excluding `ERR_ABORTED`/`TimeoutError`, which are common and often benign in this OAuth redirect chain), and raise (not swallow) only for the two safest call sites: the very first `goto_page()` call right after a fresh CDP connect in each login path (`open_tid_from_my()`'s first hop to `MY_PAGE_URL`, and the `TWORLD_LOGIN_URL` goto in the general/tworld path) - a hard failure there strongly signals a systemic Browserless/network issue, not something a middle-hop retry would fix. Middle hops were deliberately excluded from scope since each is an independent top-level navigation that doesn't strictly depend on the prior hop succeeding.
+5. ~~Bigger, deliberately-not-started idea: move the warm-refresh worker off Vercel entirely and run it as a persistent process directly on the Oracle ARM server~~ **Done 2026-07-16 - see "Oracle Worker Migration" above.** Kept here as a pointer since this bullet was the origin of that work.
+6. **New watch point (2026-07-16)**: the Oracle worker and Vercel's `warm_tick` now run in parallel indefinitely until the observation period above concludes - if debugging a scheduling oddity, check `sudo journalctl -u tworld-worker` on the Oracle box in addition to `vercel logs`, since either system could have handled any given refresh.
 
 ## Recent Commit Timeline (this multi-day session, newest first)
 
+- `50a5b8d` - Add systemd unit files for the Oracle worker
+- `c60a5d1` - Add oracle/worker_tick.py - single-tick scraper for the Oracle worker
+- `f4679f5` - Fix ModuleNotFoundError breaking /api/get_barcode after the barcode_core split
+- `98ee988` - Extract reusable scraping/scheduling logic into api/barcode_core.py
+- `822e09b` - Fix expireSeconds=0 truthiness bug, fail closed on Redis outage, adaptive status polling
+- `7acae8a` - Trim redundant CDP round-trips and MGET keys
+- `83242b9` - Cut Vercel Fluid Active CPU on the hot cache-hit path
+- `27cc7ac` - Fix per-card timer/status freezing during active refresh
+- `420cebe` - Revert same-account chaining, keep the false-success bug fix
+- `7d77fae` - Add per-request tagged logging to diagnose the chaining feature's real behavior
+- `2712f9c` - Fix false-success bug that turned lock contention into a retry storm
+- `c144df7` - Loosen the chain budget threshold and log the chain decision
+- `a1e7129` - Chain the same-account sibling scrape into the same warm_tick request (reverted above)
+- `a633aef` - Sync the card timer's stale-elapsed display with the status panel's
+- `8f4d9d7` - Center the name column and widen it by ~5 characters for more breathing room
+- `a0b6dd7` - Widen the status panel's name column so it doesn't crowd the 우주 column
+- `c43e5ce` - Switch barcode to Code128 Set C, keep status-panel time flowing during refresh, grid-align columns
+- `eaeae89` - Show live elapsed time next to expired barcodes, not just "만료됨"
+- `1dd4e6b` - Remove dead 423-retry-queue code, harden MGET against short responses
+- `3874889` - Update HANDOFF_CLAUDE_CODE.md for the warm_tick consolidation + MGET batching
 - `7d73897` - Consolidate refresh path to warm_tick, batch Redis reads, dedupe frontend polling
 - `159ab21` - Bring HANDOFF_CLAUDE_CODE.md up to date with the full 2026-07-13/15 session
 - `77a2bc9` - Remove dead code and stale files found during scheduled monitoring pass
@@ -278,7 +333,7 @@ curl.exe -s -S --max-time 70 $url
 Run before commit:
 
 ```powershell
-python -m py_compile api\get_barcode.py api\warm_status.py api\warm_tick.py
+python -m py_compile api\get_barcode.py api\barcode_core.py api\warm_status.py api\warm_tick.py oracle\worker_tick.py
 node -e "const fs=require('fs');const html=fs.readFileSync('public/index.html','utf8');const m=html.match(/<script>([\s\S]*)<\/script>/); new Function(m[1]); console.log('JS_OK')"
 if (Test-Path api\__pycache__) { Remove-Item -Recurse -Force api\__pycache__ }
 git diff --check
@@ -286,7 +341,16 @@ git diff --check
 
 ## Last Observed Production State
 
-Observed 2026-07-15, during a 2-hour scheduled monitoring/cleanup pass, and again right after the refresh-path consolidation deploy:
+**2026-07-16**, right after the Oracle worker went live:
+
+- All six slots healthy; `barcode_core.py` split verified via regression tests, then live-verified via a real successful scrape immediately after the sys.path hotfix deployed.
+- Oracle worker (`tworld-worker.timer`, every 20s) confirmed automatically catching and successfully refreshing multiple real targets with zero manual triggering, including one self-healing transient-failure case (`mother-general`, 3x `tworld_barcode_not_found` then success - existing retry logic working as designed, not a new bug).
+- Confirmed via `systemd`'s own accounting: ~2-3s CPU per successful scrape on the Oracle side.
+- Confirmed via `warm_status` that Vercel's read path sees Oracle-worker-written results immediately, with zero frontend changes.
+- Confirmed via repeated "warm lock busy" log lines on both sides that Vercel's `warm_tick` (still driven by cron-job.org every 1 min) and the Oracle worker coexist safely on the shared Redis locks, as designed.
+- Not yet confirmed: actual Vercel CPU-hour reduction on the usage dashboard (needs a few days of data before/after to compare) - check this before reducing cron-job.org's frequency.
+
+Earlier snapshot, 2026-07-15, during a 2-hour scheduled monitoring/cleanup pass, and again right after the refresh-path consolidation deploy:
 
 - All six slots healthy across multiple checks; no 5xx errors or timeouts seen across several minutes of live log watching.
 - Watched the early-login-lead mechanism succeed live in production twice (어머니 pair and 아버지 pair), each completing within ~40s of real expiry.
