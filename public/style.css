@@ -1,7 +1,7 @@
 @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@400;500;700&display=swap');
 
 :root {
-    color-scheme: light dark;
+    color-scheme: only light;
     --bg-color: #f0f2f5;
     --card-bg: #ffffff;
     --primary-color: #e81e22;

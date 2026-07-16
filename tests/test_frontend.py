@@ -16,9 +16,9 @@ def test_barcode_subtree_opts_out_of_forced_darkening():
     index = (ROOT / "public" / "index.html").read_text(encoding="utf-8")
     css = (ROOT / "public" / "style.css").read_text(encoding="utf-8")
 
-    assert '<meta name="color-scheme" content="light dark">' in index
-    assert ':root { color-scheme: light dark; }' in index
-    assert "style.css?v=20260716-dark-barcode-2" in index
+    assert '<meta name="color-scheme" content="only light">' in index
+    assert ':root, html, body { color-scheme: only light !important; }' in index
+    assert "style.css?v=20260716-dark-barcode-3" in index
     assert ".barcode-container img" in index
     assert "color-scheme: only light !important" in index
     assert "color-scheme: only light" in css
