@@ -1,0 +1,16 @@
+[Unit]
+Description=T-World barcode worker - single tick
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=tworld
+Group=tworld
+WorkingDirectory=/opt/tworld-worker/repo/oracle
+EnvironmentFile=/opt/tworld-worker/.env
+# `timeout` is the actual hard-kill safety net here (not an in-process watchdog thread) -
+# see the migration plan: a oneshot process re-run by a timer, killed cleanly at the OS
+# level if a single cycle hangs, is simpler and more reliable than trying to interrupt a
+# stuck synchronous Playwright call from a second thread.
+ExecStart=/usr/bin/timeout 100 /opt/tworld-worker/venv/bin/python3 /opt/tworld-worker/repo/oracle/worker_tick.py

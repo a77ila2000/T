@@ -1,0 +1,10 @@
+[Unit]
+Description=Run the T-World barcode worker tick every 20s
+
+[Timer]
+OnBootSec=30s
+OnUnitActiveSec=20s
+AccuracySec=1s
+
+[Install]
+WantedBy=timers.target
