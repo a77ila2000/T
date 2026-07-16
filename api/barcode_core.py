@@ -711,6 +711,13 @@ def submit_tid_credentials(page, target, label=""):
         page.locator("button:has-text('로그인'), button:has-text('Login'), input[type='submit'], button").last.click(force=True, timeout=2200)
         print(prefix + "debug locator force click submit", flush=True)
     except Exception as exc:
+        # A successful DOM click can start navigation while Playwright is still waiting for
+        # this fallback locator. In that case the locator disappears and raises a timeout
+        # even though login already succeeded. Re-check the URL at the exception boundary
+        # so we stop immediately instead of reporting a false failure and waiting again.
+        if "auth.skt-id.co.kr" not in safe_url(page):
+            print(prefix + "debug locator submit superseded by navigation", flush=True)
+            return
         print(prefix + f"login button locator failed: {exc}", flush=True)
     page.wait_for_timeout(200)
     if "auth.skt-id.co.kr" not in safe_url(page):
