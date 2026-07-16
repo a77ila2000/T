@@ -484,7 +484,6 @@
                     const objectUrl = URL.createObjectURL(blob);
                     const parsedSecondsLeft = parseInt(response.headers.get('X-Barcode-Seconds-Left') || '', 10);
                     const secondsLeft = Number.isFinite(parsedSecondsLeft) ? parsedSecondsLeft : BARCODE_VALID_TIME;
-                    const barcodeNumber = response.headers.get('X-Barcode-Number') || '';
                     const membershipGrade = response.headers.get('X-Membership-Grade') || '';
                     const isStale = response.headers.get('X-Barcode-Stale') === '1';
                     const parsedStaleSeconds = parseInt(response.headers.get('X-Barcode-Stale-Seconds') || '', 10);
@@ -517,11 +516,9 @@
                         // same warm_status polling as the status panel above) takes over the
                         // continuous ticking from here, so the two never drift apart.
                         timerEl.textContent = `만료됨 (${formatMinSec(staleSeconds)} 경과)`;
-                        statusEl.textContent = barcodeNumber
-                            ? `마지막 ${barcodeTypes[barcodeType]}를 표시 중입니다. 순차 갱신 대기 중입니다. (${barcodeNumber})`
-                            : `마지막 ${barcodeTypes[barcodeType]}를 표시 중입니다. 순차 갱신 대기 중입니다.`;
+                        statusEl.textContent = `마지막 ${barcodeTypes[barcodeType]}를 표시 중입니다. 순차 갱신 대기 중입니다.`;
                     } else {
-                        statusEl.textContent = barcodeNumber ? `${barcodeTypes[barcodeType]}가 생성되었습니다. (${barcodeNumber})` : `${barcodeTypes[barcodeType]}가 생성되었습니다.`;
+                        statusEl.textContent = `${barcodeTypes[barcodeType]}가 생성되었습니다.`;
                         startTimer(accountId, barcodeType, secondsLeft);
                     }
                 } catch (error) {

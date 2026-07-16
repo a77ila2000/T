@@ -40,6 +40,9 @@ def test_get_barcode_returns_cached_svg_and_metadata(monkeypatch, client):
     assert response.mimetype == "image/svg+xml"
     assert b"1234567890123456" in response.data
     assert b"<rect" in response.data
+    assert b"color-scheme:only light" in response.data
+    assert b'fill="#ffffff"' in response.data
+    assert b'fill="#000000"' in response.data
     assert response.headers["X-Barcode-Number"] == "1234567890123456"
     assert response.headers["X-Barcode-Seconds-Left"] == "120"
     assert response.headers["X-Barcode-Stale"] == "0"

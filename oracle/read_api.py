@@ -126,10 +126,11 @@ def render_barcode_svg(number):
 
     return (
         f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{bar_height + text_height}" '
-        f'viewBox="0 0 {width} {bar_height + text_height}" role="img" aria-label="Barcode {digits}">'
-        '<rect width="100%" height="100%" fill="white"/>'
-        f'<g fill="black">{"".join(rectangles)}</g>'
-        f'<text x="50%" y="190" text-anchor="middle" font-family="Arial,sans-serif" font-size="22">{digits}</text>'
+        f'viewBox="0 0 {width} {bar_height + text_height}" role="img" aria-label="Barcode {digits}" '
+        f'style="color-scheme:only light;background-color:#fff">'
+        '<rect width="100%" height="100%" fill="#ffffff"/>'
+        f'<g fill="#000000" shape-rendering="crispEdges">{"".join(rectangles)}</g>'
+        f'<text x="50%" y="190" text-anchor="middle" font-family="Arial,sans-serif" font-size="22" fill="#000000">{digits}</text>'
         '</svg>'
     )
 
