@@ -226,3 +226,66 @@ class TestPairedRefresh:
         assert calls["contexts"] == [shared_context, shared_context]
         assert "timeout=100000" in calls["url"]
         assert calls["close"] == 1
+
+
+class TestGeneralWorkerFastPath:
+    def test_reuses_callback_my_page_without_fixed_waits_or_second_navigation(self, monkeypatch):
+        target = {"id": "same", "type": "general", "name": "same-general"}
+        navigations = []
+
+        class FakePage:
+            def __init__(self):
+                # The initial URL shares the m.tworld.co.kr host but is not an authenticated
+                # callback. It must still enter credentials without relying on a fixed sleep.
+                self.url = "https://m.tworld.co.kr/common/tid/login?target=/v6/my"
+                self.waits = []
+
+            def set_default_timeout(self, _timeout):
+                pass
+
+            def wait_for_timeout(self, timeout):
+                self.waits.append(timeout)
+
+            def close(self):
+                pass
+
+        page = FakePage()
+
+        class FakeContext:
+            def new_page(self):
+                return page
+
+        def fake_goto(_page, url, **_kwargs):
+            navigations.append(url)
+
+        def fake_wait_for_result(_page, _timeout, settle_ms=800):
+            assert settle_ms == 0
+            page.url = "https://m.tworld.co.kr/v6/my"
+            return "callback"
+
+        monkeypatch.setattr(wt, "goto_page", fake_goto)
+        monkeypatch.setattr(wt, "wait_for_tid_login_form", lambda *a, **k: None)
+        submissions = []
+        monkeypatch.setattr(wt, "submit_tid_credentials", lambda *a, **k: submissions.append(True))
+        monkeypatch.setattr(wt, "wait_for_tworld_result", fake_wait_for_result)
+        monkeypatch.setattr(wt, "wait_for_my_ready", lambda *a, **k: None)
+        monkeypatch.setattr(
+            wt,
+            "fetch_tworld_membership_data",
+            lambda _page: {"number": "1234567890123456", "seconds_left": 1200, "grade": "V"},
+        )
+        monkeypatch.setattr(wt, "set_cached_barcode", lambda *a, **k: None)
+
+        result = wt._scrape_target_in_context(
+            FakeContext(),
+            target,
+            {"id": "same", "password": "pw"},
+            False,
+            time.monotonic(),
+            wt.PAIR_SCRAPE_BUDGET_SECONDS,
+        )
+
+        assert result == {"success": True, "code": "200"}
+        assert navigations == [wt.TWORLD_LOGIN_URL]
+        assert submissions == [True]
+        assert page.waits == []

@@ -244,6 +244,29 @@ class TestWaitForTidResult:
         assert page.waits == []
 
 
+class TestWaitForTworldResult:
+    class FakePage:
+        url = "https://m.tworld.co.kr/v6/my"
+
+        def __init__(self):
+            self.waits = []
+
+        def wait_for_timeout(self, timeout_ms):
+            self.waits.append(timeout_ms)
+
+    def test_worker_can_delegate_settle_to_my_ready_check(self):
+        page = self.FakePage()
+
+        assert bc.wait_for_tworld_result(page, 50, settle_ms=0) == "callback"
+        assert page.waits == []
+
+    def test_default_settle_is_preserved_for_other_callers(self):
+        page = self.FakePage()
+
+        assert bc.wait_for_tworld_result(page, 50) == "callback"
+        assert page.waits == [800]
+
+
 class TestFetchTworldMembershipData:
     def test_uses_the_real_api_endpoint_and_session_headers(self):
         # 2026-07-16: `/common/my/tmembership` (no /api/v6 prefix) always 404s - it isn't a

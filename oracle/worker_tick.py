@@ -93,25 +93,32 @@ def _scrape_target_in_context(context, target, creds, force_scrape, started, bud
         if barcode_type == "general":
             stage = "open_tworld_login"; mark(stage)
             goto_page(page, TWORLD_LOGIN_URL, timeout=12000)
-            page.wait_for_timeout(900)
             mark("after_goto_tworld_login")
-            if "m.tworld.co.kr" not in safe_url(page):
+            # TWORLD_LOGIN_URL itself is also on m.tworld.co.kr.  Only /v6/my proves that
+            # SSO has already completed; treating the still-redirecting login URL as a
+            # callback would skip credential entry when the fixed 900ms sleep is removed.
+            if not safe_url(page).startswith("https://m.tworld.co.kr/v6/my"):
                 wait_for_tid_login_form(page, 10000)
                 stage = "type_tworld_tid_credentials"; mark(stage)
                 submit_tid_credentials(page, creds, "tworld")
                 mark("after_submit_tworld_tid_credentials")
-                result = wait_for_tworld_result(page, 12000)
+                # wait_for_my_ready() below is the authoritative readiness check. The
+                # shared helper's default 800ms settle remains unchanged for Vercel, but
+                # making the worker wait here and then navigate to /v6/my again was pure
+                # duplicate latency on every paired refresh.
+                result = wait_for_tworld_result(page, 12000, settle_ms=0)
                 if result == "timeout" and "auth.skt-id.co.kr" in safe_url(page) and (time.monotonic() - started) < (budget_seconds - 15):
                     stage = "retry_tworld_idpw_login"; mark(stage)
                     ensure_idpw_login_mode(page)
                     submit_tid_credentials(page, creds, "tworld-retry")
-                    result = wait_for_tworld_result(page, 12000)
+                    result = wait_for_tworld_result(page, 12000, settle_ms=0)
                     mark("after_retry_tworld_idpw_login")
             else:
                 result = "callback"
             print(f"debug tworld login result={result} url={safe_url(page)}", flush=True)
             stage = "open_tworld_my"; mark(stage)
-            goto_page(page, TWORLD_MY_URL, timeout=12000)
+            if not safe_url(page).startswith("https://m.tworld.co.kr/v6/my"):
+                goto_page(page, TWORLD_MY_URL, timeout=12000)
             wait_for_my_ready(page, 6000)
             stage = "fetch_tworld_membership_data"; mark(stage)
             barcode_api = fetch_tworld_membership_data(page)

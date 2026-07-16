@@ -599,15 +599,17 @@ def wait_for_tid_result(page, timeout_ms=10000):
     return "timeout"
 
 
-def wait_for_tworld_result(page, timeout_ms=12000):
+def wait_for_tworld_result(page, timeout_ms=12000, settle_ms=800):
     end = time.monotonic() + timeout_ms / 1000
     while time.monotonic() < end:
         if "m.tworld.co.kr" in safe_url(page):
-            page.wait_for_timeout(800)
+            if settle_ms:
+                page.wait_for_timeout(settle_ms)
             return "callback"
         time.sleep(0.2)
     if "m.tworld.co.kr" in safe_url(page):
-        page.wait_for_timeout(800)
+        if settle_ms:
+            page.wait_for_timeout(settle_ms)
         return "callback"
     print(f"debug T world result wait timed out at url={safe_url(page)} body={get_body_text(page, 200)}", flush=True)
     return "timeout"
