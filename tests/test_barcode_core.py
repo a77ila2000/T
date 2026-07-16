@@ -150,6 +150,47 @@ class TestRecordWarmResult:
 
 
 class TestSubmitTidCredentialsStopsOnceNavigatedAway:
+    def test_dom_evaluate_navigation_error_stops_remaining_fallbacks(self, monkeypatch, capsys):
+        log = []
+
+        class FakeLocator:
+            @property
+            def first(self):
+                return self
+
+            def press(self, *a, **k):
+                log.append("press")
+
+        class FakePage:
+            def __init__(self):
+                self.url = "https://auth.skt-id.co.kr/v2/login"
+
+            def locator(self, _selector):
+                return FakeLocator()
+
+            def evaluate(self, *a, **k):
+                log.append("js-evaluate")
+                self.url = "https://m.tworld.co.kr/common/member/line"
+                raise RuntimeError("execution context destroyed during navigation")
+
+            def wait_for_timeout(self, *a, **k):
+                pass
+
+            def is_closed(self):
+                return False
+
+        monkeypatch.setattr(bc, "type_first_visible", lambda *a, **k: "ok")
+        monkeypatch.setattr(bc, "ensure_idpw_login_mode", lambda p: None)
+        monkeypatch.setattr(bc, "physical_tap_at", lambda *a, **k: log.append("physical-tap"))
+        monkeypatch.setattr(bc, "force_submit", lambda *a, **k: log.append("force-submit"))
+
+        bc.submit_tid_credentials(FakePage(), {"id": "me", "password": "x"}, "test")
+
+        output = capsys.readouterr().out
+        assert log == ["press", "js-evaluate"]
+        assert "debug dom submit superseded by navigation" in output
+        assert "debug dom login click failed" not in output
+
     def test_no_further_actions_after_successful_navigation(self, monkeypatch):
         # 2026-07-16 bug: submit_tid_credentials() fired a fixed ladder of fallback submit
         # actions with no check for whether an earlier one had already succeeded and

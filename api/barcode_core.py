@@ -703,6 +703,12 @@ def submit_tid_credentials(page, target, label=""):
         """)
         print(prefix + f"debug dom login click target={clicked}", flush=True)
     except Exception as exc:
+        # evaluate() can be interrupted by the navigation that its own click just started.
+        # Treat that race as success once the page has already left T-ID, and do not wait or
+        # fire any fallback against the destination page.
+        if "auth.skt-id.co.kr" not in safe_url(page):
+            print(prefix + "debug dom submit superseded by navigation", flush=True)
+            return
         print(prefix + f"debug dom login click failed: {exc}", flush=True)
     page.wait_for_timeout(500)
     if "auth.skt-id.co.kr" not in safe_url(page):
