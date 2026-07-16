@@ -174,6 +174,30 @@ class TestPairedRefresh:
         assert sibling is None
         assert state == sibling_state
 
+    def test_one_second_ttl_skew_at_lead_boundary_still_pairs(self, monkeypatch):
+        # 2026-07-16 live regression: primary was due at now+20 and sibling at now+21.
+        # The shared rotation was the same, but the one-second API TTL rounding difference
+        # excluded general and delayed it until the next 20-second systemd tick.
+        now = int(time.time())
+        target = {"id": "a77ila2000", "type": "universe", "name": "me-universe"}
+        sibling_state = {"next_refresh_at": now + 21, "consecutive_failures": 0}
+        monkeypatch.setattr(wt, "mget_padded", lambda keys: [json.dumps(sibling_state)])
+
+        sibling, state = wt.select_pair_sibling(target, now, primary_due_at=now + 20)
+
+        assert sibling is not None and sibling["name"] == "me-general"
+        assert state == sibling_state
+
+    def test_skew_allowance_never_shortens_failure_backoff(self, monkeypatch):
+        now = int(time.time())
+        target = {"id": "a77ila2000", "type": "universe", "name": "me-universe"}
+        sibling_state = {"next_refresh_at": now + 1, "consecutive_failures": 1}
+        monkeypatch.setattr(wt, "mget_padded", lambda keys: [json.dumps(sibling_state)])
+
+        sibling, _state = wt.select_pair_sibling(target, now, primary_due_at=now + 20)
+
+        assert sibling is None
+
     def test_batch_reuses_one_browser_context_for_both_types(self, monkeypatch):
         target_a = {"id": "same", "type": "universe", "name": "same-universe"}
         target_b = {"id": "same", "type": "general", "name": "same-general"}

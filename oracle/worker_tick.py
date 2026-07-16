@@ -28,6 +28,7 @@ from barcode_core import (
 WORKER_SCRAPE_BUDGET_SECONDS = 90
 PAIR_SCRAPE_BUDGET_SECONDS = 100
 PAIR_BROWSERLESS_TIMEOUT_MS = 100000
+PAIR_DUE_SKEW_SECONDS = 5
 BROWSERLESS_WS_URL = os.environ.get("BROWSERLESS_WS_URL", "ws://localhost:3000")
 BROWSERLESS_TOKEN = os.environ.get("BROWSERLESS_TOKEN", "")
 HEARTBEAT_KEY = "barcode:worker-heartbeat"
@@ -47,7 +48,7 @@ def make_mark(started, budget_seconds=WORKER_SCRAPE_BUDGET_SECONDS):
     return mark
 
 
-def select_pair_sibling(target, now=None):
+def select_pair_sibling(target, now=None, primary_due_at=None):
     """Return the other barcode type when it is due in the same early-login window."""
     now = int(now or time.time())
     sibling = next(
@@ -67,8 +68,20 @@ def select_pair_sibling(target, now=None):
         print(f"pair sibling state parse failed: {exc}", flush=True)
         state = {}
     due_at = int(state.get("next_refresh_at") or 0)
-    effective_lead = 0 if int(state.get("consecutive_failures", 0)) > 0 else WARM_EARLY_LOGIN_LEAD_SECONDS
-    if due_at > now + effective_lead:
+    failing = int(state.get("consecutive_failures", 0)) > 0
+    if failing:
+        pair_deadline = now
+    else:
+        # Both types share the same site-side rotation clock, but their independently
+        # recorded API TTLs can differ by a second or two. At the exact early-lead edge an
+        # observed +20s/+21s split excluded the sibling and delayed it to the next 20s tick.
+        # Permit only a small skew relative to the selected primary's success schedule;
+        # failure backoff above intentionally gets no lead or skew.
+        primary_due_at = int(primary_due_at or 0)
+        pair_deadline = now + WARM_EARLY_LOGIN_LEAD_SECONDS
+        if primary_due_at:
+            pair_deadline = max(pair_deadline, primary_due_at + PAIR_DUE_SKEW_SECONDS)
+    if due_at > pair_deadline:
         return None, state
     return sibling, state
 
@@ -306,7 +319,11 @@ def main():
     selection_now = int(time.time())
     requests = [(target, int(state.get("next_refresh_at") or 0) > selection_now)]
     try:
-        sibling, sibling_state = select_pair_sibling(target, selection_now)
+        sibling, sibling_state = select_pair_sibling(
+            target,
+            selection_now,
+            int(state.get("next_refresh_at") or 0),
+        )
     except RedisUnavailable:
         # Primary selection was already made from a successful MGET. If the additional
         # sibling read fails, keep the known-safe single-target path rather than guessing.
