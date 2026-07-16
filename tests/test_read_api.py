@@ -1,4 +1,5 @@
 import json
+import struct
 from types import SimpleNamespace
 
 import pytest
@@ -21,7 +22,7 @@ def test_healthz_has_cors_headers(client):
     assert "X-Barcode-Number" in response.headers["Access-Control-Expose-Headers"]
 
 
-def test_get_barcode_returns_cached_svg_and_metadata(monkeypatch, client):
+def test_get_barcode_returns_cached_png_and_metadata(monkeypatch, client):
     monkeypatch.setattr(api, "time", SimpleNamespace(time=lambda: 1_000.0))
     redis_calls = []
 
@@ -37,17 +38,28 @@ def test_get_barcode_returns_cached_svg_and_metadata(monkeypatch, client):
     response = client.get("/api/get_barcode?id=a77ila2000&type=universe")
 
     assert response.status_code == 200
-    assert response.mimetype == "image/svg+xml"
-    assert b"1234567890123456" in response.data
-    assert b"<rect" in response.data
-    assert b"color-scheme:only light" in response.data
-    assert b'fill="#ffffff"' in response.data
-    assert b'fill="#000000"' in response.data
+    assert response.mimetype == "image/png"
+    assert response.data.startswith(b"\x89PNG\r\n\x1a\n")
+    assert struct.unpack(">II", response.data[16:24]) == (429, 196)
     assert response.headers["X-Barcode-Number"] == "1234567890123456"
     assert response.headers["X-Barcode-Seconds-Left"] == "120"
     assert response.headers["X-Barcode-Stale"] == "0"
     assert response.headers["X-Membership-Grade"] == "VIP"
     assert redis_calls == [["barcode:universe:a77ila2000", "barcode:a77ila2000"]]
+
+
+def test_barcode_png_is_cached_and_keeps_exact_api_number_in_header(monkeypatch, client):
+    number = "1234567890123456"
+    monkeypatch.setattr(api, "mget_padded", lambda keys: [json.dumps({
+        "number": number,
+        "expires_at": api.time.time() + 120,
+    }), None])
+
+    first = client.get("/api/get_barcode?id=a77ila2000&type=universe")
+    second = client.get("/api/get_barcode?id=a77ila2000&type=universe")
+
+    assert first.data == second.data == api.render_barcode_png(number)
+    assert first.headers["X-Barcode-Number"] == number
 
 
 def test_get_barcode_returns_stale_cache_instead_of_scraping(monkeypatch, client):

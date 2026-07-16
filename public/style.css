@@ -129,13 +129,15 @@ header h1 {
     display: flex;
     align-items: center;
     justify-content: center;
-    /* Barcode contrast is functional, not decorative. Samsung Internet/Chromium force-dark
-       may otherwise remap the SVG's white and black pixels to gray. `only light` opts this
-       subtree out of automatic darkening while the rest of the page may remain dark. */
+    /* Barcode contrast is functional, not decorative. Samsung Force Dark can ignore the
+       document opt-out and compress white/black to roughly 74/38. This post-compositing
+       correction maps those measured values back near 255/0 and is a no-op for pure 255/0. */
     color-scheme: only light;
     forced-color-adjust: none;
     background-color: #ffffff !important;
     color: #000000 !important;
+    filter: brightness(2.4) contrast(3) !important;
+    -webkit-filter: brightness(2.4) contrast(3) !important;
     border-radius: 8px;
     border: 1px dashed var(--border-color);
     position: relative;

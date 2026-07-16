@@ -18,11 +18,13 @@ def test_barcode_subtree_opts_out_of_forced_darkening():
 
     assert '<meta name="color-scheme" content="only light">' in index
     assert ':root, html, body { color-scheme: only light !important; }' in index
-    assert "style.css?v=20260716-dark-barcode-3" in index
+    assert "style.css?v=20260716-dark-barcode-4" in index
     assert ".barcode-container img" in index
     assert "color-scheme: only light !important" in index
     assert "color-scheme: only light" in css
     assert "forced-color-adjust: none" in css
     assert "background-color: #ffffff !important" in css
-    assert "filter: none !important" in css
+    assert "filter: brightness(2.4) contrast(3) !important" in index
+    assert "filter: brightness(2.4) contrast(3) !important" in css
+    assert "filter: none !important" in index
     assert "@media (prefers-color-scheme: dark)" in css
