@@ -225,6 +225,58 @@ class TestSubmitTidCredentialsStopsOnceNavigatedAway:
         assert log.count("js-evaluate") == 1
         assert not any(entry == "click" for entry in log)
 
+    def test_locator_timeout_after_navigation_stops_remaining_fallbacks(self, monkeypatch, capsys):
+        log = []
+
+        class FakeLocator:
+            def __init__(self, page):
+                self.page = page
+
+            @property
+            def first(self):
+                return self
+
+            @property
+            def last(self):
+                return self
+
+            def press(self, *a, **k):
+                log.append("press")
+
+            def click(self, *a, **k):
+                log.append("locator-click")
+                self.page.url = "https://m.tworld.co.kr/common/member/line"
+                raise TimeoutError("locator disappeared during navigation")
+
+        class FakePage:
+            def __init__(self):
+                self.url = "https://auth.skt-id.co.kr/v2/login"
+
+            def locator(self, _selector):
+                return FakeLocator(self)
+
+            def evaluate(self, *a, **k):
+                log.append("js-evaluate")
+                return "clicked-something"
+
+            def wait_for_timeout(self, *a, **k):
+                pass
+
+            def is_closed(self):
+                return False
+
+        monkeypatch.setattr(bc, "type_first_visible", lambda *a, **k: "ok")
+        monkeypatch.setattr(bc, "ensure_idpw_login_mode", lambda p: None)
+        monkeypatch.setattr(bc, "physical_tap_at", lambda *a, **k: log.append("physical-tap"))
+        monkeypatch.setattr(bc, "force_submit", lambda *a, **k: log.append("force-submit"))
+
+        bc.submit_tid_credentials(FakePage(), {"id": "me", "password": "x"}, "test")
+
+        output = capsys.readouterr().out
+        assert log == ["press", "js-evaluate", "locator-click"]
+        assert "debug locator submit superseded by navigation" in output
+        assert "login button locator failed" not in output
+
 
 class TestWaitForTidResult:
     class FakePage:
