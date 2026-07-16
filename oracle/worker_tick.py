@@ -86,6 +86,11 @@ def select_pair_sibling(target, now=None, primary_due_at=None):
     return sibling, state
 
 
+def order_pair_requests(requests):
+    """Keep the user-visible pair order deterministic even when TTL rounding picks general."""
+    return sorted(requests, key=lambda request: 0 if request[0]["type"] == "universe" else 1)
+
+
 def _scrape_target_in_context(context, target, creds, force_scrape, started, budget_seconds):
     # Each target gets a fresh page, while the shared BrowserContext keeps T-ID/SSO cookies
     # from the first type available to the second type. This avoids cross-page DOM state while
@@ -331,6 +336,7 @@ def main():
         sibling, sibling_state = None, {}
     if sibling:
         requests.append((sibling, int(sibling_state.get("next_refresh_at") or 0) > selection_now))
+        requests = order_pair_requests(requests)
         print(f"paired refresh selected primary={target['name']} sibling={sibling['name']}", flush=True)
 
     browser_lock_token = acquire_browser_lock(target["id"], ttl=130)

@@ -199,6 +199,17 @@ class TestPairedRefresh:
 
         assert sibling is None
 
+    def test_general_primary_is_still_executed_universe_first(self):
+        universe = {"id": "same", "type": "universe", "name": "same-universe"}
+        general = {"id": "same", "type": "general", "name": "same-general"}
+
+        ordered = wt.order_pair_requests([(general, False), (universe, True)])
+
+        assert [(target["type"], force) for target, force in ordered] == [
+            ("universe", True),
+            ("general", False),
+        ]
+
     def test_batch_reuses_one_browser_context_for_both_types(self, monkeypatch):
         target_a = {"id": "same", "type": "universe", "name": "same-universe"}
         target_b = {"id": "same", "type": "general", "name": "same-general"}

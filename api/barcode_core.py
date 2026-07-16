@@ -66,10 +66,13 @@ WARM_CURRENT_TTL = 90
 # tail end of the old cycle, poll_for_fresh_barcode() waits it out in place (no re-login
 # needed) until the real rotation happens. The Oracle timer itself runs every 20s, so a 20s
 # lead only started the job anywhere from 0-20s early; live login took 10-12s and could consume
-# that entire margin. A 40s selection window makes the first eligible tick land roughly
-# 20-40s before expiry without increasing tick/Redis frequency. This is still one scrape per
-# ~20min cycle - the authenticated page simply waits for the actual rotation when necessary.
-WARM_EARLY_LOGIN_LEAD_SECONDS = 40
+# that entire margin. Live API expiry estimates also differed from the observed rotation by
+# roughly 10-12s. A 60s selection window covers one timer interval + that clock/TTL skew + a
+# real pre-login margin, making the first eligible tick land roughly 40-60s before the stored
+# deadline and normally at least ~20s before the real rotation. This does not increase
+# tick/Redis frequency and is still one scrape per ~20min cycle - the authenticated page
+# simply waits for the actual rotation when necessary.
+WARM_EARLY_LOGIN_LEAD_SECONDS = 60
 LAST_BARCODE_RETENTION = 7 * 24 * 60 * 60
 
 
