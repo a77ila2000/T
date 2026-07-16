@@ -179,11 +179,12 @@ class TestPairedRefresh:
         # The shared rotation was the same, but the one-second API TTL rounding difference
         # excluded general and delayed it until the next 20-second systemd tick.
         now = int(time.time())
+        lead = wt.WARM_EARLY_LOGIN_LEAD_SECONDS
         target = {"id": "a77ila2000", "type": "universe", "name": "me-universe"}
-        sibling_state = {"next_refresh_at": now + 21, "consecutive_failures": 0}
+        sibling_state = {"next_refresh_at": now + lead + 1, "consecutive_failures": 0}
         monkeypatch.setattr(wt, "mget_padded", lambda keys: [json.dumps(sibling_state)])
 
-        sibling, state = wt.select_pair_sibling(target, now, primary_due_at=now + 20)
+        sibling, state = wt.select_pair_sibling(target, now, primary_due_at=now + lead)
 
         assert sibling is not None and sibling["name"] == "me-general"
         assert state == sibling_state

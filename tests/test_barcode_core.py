@@ -80,6 +80,23 @@ class TestSelectWarmTargetEarlyLead:
         target, _ = bc.select_warm_target(now)
         assert target is not None and target["name"] == "me-universe"
 
+    def test_lead_includes_one_timer_interval_plus_login_margin(self, _isolate_redis):
+        # With a 20s timer, a 20s lead could start at expiry. The 40s window guarantees the
+        # preceding tick can spend about 20s authenticating while the old barcode is valid.
+        now = int(time.time())
+        for t in bc.WARM_TARGETS:
+            _isolate_redis[bc.warm_state_key(t["id"], t["type"])] = json.dumps(
+                {"next_refresh_at": now + 5000}
+            )
+        _isolate_redis[bc.warm_state_key("a77ila2000", "universe")] = json.dumps(
+            {"next_refresh_at": now + 35}
+        )
+
+        target, _ = bc.select_warm_target(now)
+
+        assert bc.WARM_EARLY_LOGIN_LEAD_SECONDS == 40
+        assert target is not None and target["name"] == "me-universe"
+
     def test_failure_backoff_does_not_get_early_lead(self, _isolate_redis):
         # 2026-07-16 bug: the 20s early-lead window was also applied on top of failure
         # backoff delays, letting a 30s backoff be selected again after only ~10s.

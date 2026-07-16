@@ -60,13 +60,16 @@ WARM_CURRENT_TTL = 90
 # on the account's current cycle, not "20 fresh minutes from whenever we happened to ask".
 # So a plain on-time scrape always spends its ~20-35s login/navigation AFTER the real expiry
 # has already passed, meaning the barcode is genuinely stale for that whole login duration.
-# To shrink that window, a scraper may pick a target up to this many seconds BEFORE its real
-# next_refresh_at (see select_warm_target) - the login/navigation happens early while the old
-# barcode is still technically valid, and once on the my-page, if the value read back still
-# looks like the tail end of the old cycle, poll_for_fresh_barcode() waits it out in place (no
-# re-login needed) until the real rotation happens. This does NOT increase scrape frequency -
-# it's still one attempt per ~20min cycle, just started slightly earlier.
-WARM_EARLY_LOGIN_LEAD_SECONDS = 20
+# To shrink that window, a scraper may pick a target before its real next_refresh_at (see
+# select_warm_target) - the login/navigation happens early while the old barcode is still
+# technically valid, and once on the my-page, if the value read back still looks like the
+# tail end of the old cycle, poll_for_fresh_barcode() waits it out in place (no re-login
+# needed) until the real rotation happens. The Oracle timer itself runs every 20s, so a 20s
+# lead only started the job anywhere from 0-20s early; live login took 10-12s and could consume
+# that entire margin. A 40s selection window makes the first eligible tick land roughly
+# 20-40s before expiry without increasing tick/Redis frequency. This is still one scrape per
+# ~20min cycle - the authenticated page simply waits for the actual rotation when necessary.
+WARM_EARLY_LOGIN_LEAD_SECONDS = 40
 LAST_BARCODE_RETENTION = 7 * 24 * 60 * 60
 
 
