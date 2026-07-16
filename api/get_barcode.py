@@ -1,6 +1,15 @@
 from flask import Flask, request, Response
-import os, json, base64, io, time, re, signal
+import os, sys, json, base64, io, time, re, signal
 from playwright.sync_api import sync_playwright
+
+# Vercel invokes this file directly as the /api/get_barcode entrypoint, which does NOT
+# automatically put this directory on sys.path for sibling imports (that's exactly why
+# warm_status.py/warm_tick.py have to do this same append before importing get_barcode as a
+# module) - without it, `from barcode_core import ...` below raises ModuleNotFoundError only
+# when get_barcode.py itself is the direct entrypoint, which is why this broke /api/get_barcode
+# specifically while /api/warm_status (which imports get_barcode, inheriting its sys.path
+# fix) kept working.
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 from barcode_core import (
     RedisUnavailable, redis_command, mget_padded, normalize_barcode_type,
