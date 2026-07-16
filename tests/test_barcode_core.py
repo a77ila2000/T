@@ -209,6 +209,41 @@ class TestSubmitTidCredentialsStopsOnceNavigatedAway:
         assert not any(entry == "click" for entry in log)
 
 
+class TestWaitForTidResult:
+    class FakePage:
+        def __init__(self, url):
+            self.url = url
+            self.waits = []
+
+        def is_closed(self):
+            return False
+
+        def wait_for_timeout(self, timeout_ms):
+            self.waits.append(timeout_ms)
+
+    def test_universe_home_is_a_completed_callback(self):
+        # The real T ID flow sometimes strips the callback path and lands on `/` after a
+        # successful login.  Waiting for `/my` in that case cost every refresh 10 seconds.
+        page = self.FakePage("https://m.sktuniverse.co.kr/")
+
+        assert bc.wait_for_tid_result(page, 50) == "callback"
+        assert page.waits == [800]
+
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "https://m.sktuniverse.co.kr/member/login/view?loginRedirectUrl=%2Fmy",
+            "https://m.sktuniverse.co.kr/netfunnel?path=%2Fmember%2Flogin%2Fview",
+        ],
+    )
+    def test_login_and_netfunnel_pages_are_not_false_successes(self, monkeypatch, url):
+        page = self.FakePage(url)
+        monkeypatch.setattr(bc, "get_body_text", lambda *a, **k: "login")
+
+        assert bc.wait_for_tid_result(page, 1) == "timeout"
+        assert page.waits == []
+
+
 class TestFetchTworldMembershipData:
     def test_uses_the_real_api_endpoint_and_session_headers(self):
         # 2026-07-16: `/common/my/tmembership` (no /api/v6 prefix) always 404s - it isn't a

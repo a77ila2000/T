@@ -580,7 +580,17 @@ def wait_for_tid_result(page, timeout_ms=10000):
     while time.monotonic() < end:
         url = safe_url(page)
         if page.is_closed(): return "closed"
-        if "/member/login/channel/tid" in url or "code=" in url or "/my" in url:
+        # A successful T ID callback can finish on the Universe home page instead of
+        # preserving `/member/login/channel/tid` or `/my` in the final URL.  Treat only a
+        # non-login Universe URL as success: the subsequent `/my` API read remains the
+        # authoritative authentication/barcode check, while avoiding a guaranteed 10s
+        # timeout after an already-completed login.
+        universe_login_finished = (
+            url.startswith("https://m.sktuniverse.co.kr")
+            and "/member/login" not in url
+            and "/netfunnel" not in url
+        )
+        if "/member/login/channel/tid" in url or "code=" in url or "/my" in url or universe_login_finished:
             print(f"debug T ID callback reached: {url}", flush=True)
             page.wait_for_timeout(800)
             return "callback"
