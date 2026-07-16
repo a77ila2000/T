@@ -3,7 +3,7 @@
 Date: 2026-07-16 KST
 Repository: `https://github.com/a77ila2000/T`
 Production URL: `https://preedgaonprime.vercel.app`
-Main branch latest commit at this handoff: `50a5b8d Add systemd unit files for the Oracle worker`
+Main branch latest commit at this handoff: `e52262e Fix the real root cause of 100% general-barcode failure: wrong T-World API endpoint`
 
 **Biggest change this session: the actual login/scrape work now runs on the Oracle VM itself, not Vercel.** See "Oracle Worker Migration" below before touching anything scheduling/scraping-related - the old "Vercel does everything" mental model from earlier handoff revisions is now only half true.
 
@@ -340,6 +340,9 @@ Also batched in the same pass: `select_warm_target()` and `warm_status()` used t
 
 ## Recent Commit Timeline (this multi-day session, newest first)
 
+- `e52262e` - Fix the real root cause of 100% general-barcode failure: wrong T-World API endpoint
+- `e2431e0` - Fix general-barcode login corruption, failure-retry early-lead bypass, and Oracle Redis quota
+- `85cae64` - Update HANDOFF_CLAUDE_CODE.md for the 2026-07-16 session
 - `50a5b8d` - Add systemd unit files for the Oracle worker
 - `c60a5d1` - Add oracle/worker_tick.py - single-tick scraper for the Oracle worker
 - `f4679f5` - Fix ModuleNotFoundError breaking /api/get_barcode after the barcode_core split
